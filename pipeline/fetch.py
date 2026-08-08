@@ -82,7 +82,7 @@ def fetch_em(defn, limit=1600):
 
 
 def fetch_tx(defn, limit=1600):
-    """腾讯日K: CN走fqkline(按defn['qfq']决定复权/不复权), 美股指数走kline"""
+    """腾讯日K: CN走fqkline(按defn['qfq']决定优先读取的复权/不复权字段), 美股指数走kline"""
     code = defn['tx']
     if code.startswith('us'):
         url = (
@@ -92,14 +92,15 @@ def fetch_tx(defn, limit=1600):
         key = 'us.' + code[2:]
         row_key = 'day'
     else:
-        qfq = defn.get('qfq', True)
-        suffix = ',qfq' if qfq else ''
+        # fqkline/get 接口的 ,qfq 后缀是硬性要求: 实测不带它只返回 {'version': ...},
+        # 不返回任何K线数据, 与是否需要前复权无关, 因此始终附加。
+        # 是否使用前复权价格由下面 row_key 的字段优先级决定。
         url = (
             f'http://web.ifzq.gtimg.cn/appstock/app/fqkline/get'
-            f'?param={code},day,,,{limit}{suffix}'
+            f'?param={code},day,,,{limit},qfq'
         )
         key = code
-        row_key = 'qfqday' if qfq else 'day'
+        row_key = 'qfqday' if defn.get('qfq', True) else 'day'
     for attempt in range(3):
         try:
             resp = requests.get(url, headers=UA, timeout=20)

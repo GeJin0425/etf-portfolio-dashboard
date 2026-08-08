@@ -33,15 +33,20 @@ def test_fetch_close_falls_back_to_tencent(monkeypatch):
 
 
 def test_fetch_tx_respects_qfq_flag(monkeypatch):
-    """回归: fetch_tx 曾经无视 defn['qfq'], 对所有CN代码都强制走前复权端点,
-    导致 qfq=False 的基准(如沪深300)在腾讯兜底源上永远拿不到不复权数据。"""
+    """回归: fetch_tx 曾经无视 defn['qfq'], 对不复权的基准(如沪深300)也优先读取
+    前复权字段(qfqday)而不是原始字段(day)。
+
+    注意: 腾讯 fqkline/get 接口的 ,qfq URL 参数是接口本身的硬性要求(实测不带它
+    只返回 {'version': ...}, 不返回任何K线数据, 与是否需要前复权无关), 所以 URL
+    上必须始终带 ,qfq; 真正决定使用哪种价格的是响应里优先读取 day 还是 qfqday 字段。"""
     captured = {}
 
     class FakeResp:
         def json(self):
-            return {'data': {'sh000300': {'day': [
-                ['2026-01-05', '1', '1', '1', '1', '10'],
-            ]}}}
+            return {'data': {'sh000300': {
+                'day': [['2026-01-05', '1', '1', '1', '1', '10']],
+                'qfqday': [['2026-01-05', '2', '2', '2', '2', '10']],
+            }}}
 
     def fake_get(url, headers, timeout):
         captured['url'] = url
@@ -50,7 +55,8 @@ def test_fetch_tx_respects_qfq_flag(monkeypatch):
     monkeypatch.setattr(fetch.requests, 'get', fake_get)
     df = fetch.fetch_tx({'tx': 'sh000300', 'qfq': False})
     assert df is not None
-    assert ',qfq' not in captured['url']
+    assert ',qfq' in captured['url']  # 接口硬性要求, 必须带
+    assert float(df['close'].iloc[0]) == 1.0  # qfq=False 应优先用 day(不复权), 而不是 qfqday
 
 
 def test_sina_us_parser(monkeypatch):
