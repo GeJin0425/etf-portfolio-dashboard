@@ -31,6 +31,7 @@ async function main() {
   checkStaleness(data.meta.as_of_date);
   renderTopbar(data);
   renderKpis(data.meta);
+  renderBenchmarkNote(data.meta);
   renderMainChart(data.series);
   renderHoldingsChart(data.holdings, data.meta.current_value);
   renderHoldingsTable(data.holdings);
@@ -76,13 +77,15 @@ function renderTopbar(data) {
 }
 
 function renderKpis(meta) {
+  const csiYtd = meta.csi300_ytd_pct == null ? '' : ` · YTD ${fmtSigned(meta.csi300_ytd_pct)}`;
+  const spxYtd = meta.sp500_ytd_pct == null ? '' : ` · YTD ${fmtSigned(meta.sp500_ytd_pct)}`;
   const cards = [
     { value: fmtSigned(meta.total_return_pct), label: '组合总收益', sub: `净值 ${fmtMoney(meta.current_value)}`, pos: true },
     { value: fmtSigned(meta.annualized_pct), label: '年化收益', pos: true },
     { value: fmtSigned(meta.max_drawdown_pct), label: '最大回撤', pos: true },
     { value: meta.sharpe.toFixed(2), label: '夏普比率', pos: false, plain: true },
-    { value: fmtSigned(meta.excess_csi300_pct), label: '超额 vs 沪深300', sub: `沪深300 ${fmtSigned(meta.csi300_return_pct)}`, pos: true },
-    { value: fmtSigned(meta.excess_sp500_pct), label: '超额 vs 标普500', sub: `标普500 ${fmtSigned(meta.sp500_return_pct)}`, pos: true },
+    { value: fmtSigned(meta.excess_csi300_pct), label: '超额 vs 沪深300', sub: `沪深300 ${fmtSigned(meta.csi300_return_pct)}(建仓)${csiYtd}`, pos: true },
+    { value: fmtSigned(meta.excess_sp500_pct), label: '超额 vs 标普500', sub: `标普500 ${fmtSigned(meta.sp500_return_pct)}(建仓)${spxYtd}`, pos: true },
   ];
   document.getElementById('kpi-row').innerHTML = cards.map(c => `
     <div class="kpi-card">
@@ -91,6 +94,14 @@ function renderKpis(meta) {
       ${c.sub ? `<div class="sub">${c.sub}</div>` : ''}
     </div>
   `).join('');
+}
+
+function renderBenchmarkNote(meta) {
+  const note = document.getElementById('benchmark-note');
+  const csi = meta.csi300_ytd_pct == null ? '--' : fmtSigned(meta.csi300_ytd_pct);
+  const spx = meta.sp500_ytd_pct == null ? '--' : fmtSigned(meta.sp500_ytd_pct);
+  note.textContent =
+    `主图收益比较以建仓日 ${meta.start_date} 收盘为起点(与组合实际买入日对齐); 官方2026 YTD(自${meta.ytd_base_date}收盘): 沪深300 ${csi} · 标普500 ${spx}`;
 }
 
 function renderMainChart(series) {

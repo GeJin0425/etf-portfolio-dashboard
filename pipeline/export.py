@@ -49,6 +49,16 @@ def next_rebalance_date(last_date):
     return None
 
 
+def ytd_return(close_series, end_date, base_date='2025-12-31'):
+    """官方口径 YTD: 以上年最后一个交易日收盘为基准"""
+    base = close_series[close_series.index <= pd.Timestamp(base_date)]
+    if base.empty:
+        return None
+    start = float(base.iloc[-1])
+    end = float(close_series.loc[pd.Timestamp(end_date)])
+    return round((end / start - 1) * 100, 2)
+
+
 def _round_list(series, ndigits=2):
     out = []
     for v in series:
@@ -108,6 +118,9 @@ def export(output_path):
     stats.update({
         'csi300_return_pct': round(float(csi_ret.iloc[-1]), 2),
         'sp500_return_pct': round(float(spx_ret.iloc[-1]), 2),
+        'csi300_ytd_pct': ytd_return(bench['000300'], dates[-1]),
+        'sp500_ytd_pct': ytd_return(bench['SPX'], dates[-1]),
+        'ytd_base_date': '2025-12-31',
         'excess_csi300_pct': round(float(port_ret.iloc[-1] - csi_ret.iloc[-1]), 2),
         'excess_sp500_pct': round(float(port_ret.iloc[-1] - spx_ret.iloc[-1]), 2),
         'rebalance_count': len(result['rebalances']),
