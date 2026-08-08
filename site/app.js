@@ -80,12 +80,12 @@ function renderKpis(meta) {
   const csiYtd = meta.csi300_ytd_pct == null ? '' : ` · YTD ${fmtSigned(meta.csi300_ytd_pct)}`;
   const spxYtd = meta.sp500_ytd_pct == null ? '' : ` · YTD ${fmtSigned(meta.sp500_ytd_pct)}`;
   const cards = [
-    { value: fmtSigned(meta.total_return_pct), label: '组合总收益', sub: `净值 ${fmtMoney(meta.current_value)}`, pos: true },
-    { value: fmtSigned(meta.annualized_pct), label: '年化收益', pos: true },
-    { value: fmtSigned(meta.max_drawdown_pct), label: '最大回撤', pos: true },
-    { value: meta.sharpe.toFixed(2), label: '夏普比率', pos: false, plain: true },
-    { value: fmtSigned(meta.excess_csi300_pct), label: '超额 vs 沪深300', sub: `沪深300 ${fmtSigned(meta.csi300_return_pct)}(建仓)${csiYtd}`, pos: true },
-    { value: fmtSigned(meta.excess_sp500_pct), label: '超额 vs 标普500', sub: `标普500 ${fmtSigned(meta.sp500_return_pct)}(建仓)${spxYtd}`, pos: true },
+    { value: fmtSigned(meta.total_return_pct), label: '组合总收益', sub: `净值 ${fmtMoney(meta.current_value)}` },
+    { value: fmtSigned(meta.annualized_pct), label: '年化收益' },
+    { value: fmtSigned(meta.max_drawdown_pct), label: '最大回撤' },
+    { value: meta.sharpe.toFixed(2), label: '夏普比率', plain: true },
+    { value: fmtSigned(meta.excess_csi300_pct), label: '超额 vs 沪深300', sub: `沪深300 ${fmtSigned(meta.csi300_return_pct)}(建仓)${csiYtd}` },
+    { value: fmtSigned(meta.excess_sp500_pct), label: '超额 vs 标普500', sub: `标普500 ${fmtSigned(meta.sp500_return_pct)}(建仓)${spxYtd}` },
   ];
   document.getElementById('kpi-row').innerHTML = cards.map(c => `
     <div class="kpi-card">
@@ -126,11 +126,16 @@ function renderMainChart(series) {
     return idx === -1 ? 0 : idx;
   }
 
+  function numericValues(...arrs) {
+    return arrs.flat().filter((v) => v !== null && v !== undefined && !Number.isNaN(v));
+  }
+
   function buildOption(start) {
     const dates = allDates.slice(start);
     const s = (arr) => arr.slice(start);
-    const minVal = Math.min(...s(series.portfolio), ...s(series.csi300), ...s(series.sp500));
-    const maxVal = Math.max(...s(series.portfolio), ...s(series.csi300), ...s(series.sp500));
+    const allValues = numericValues(s(series.portfolio), s(series.csi300), s(series.sp500));
+    const minVal = Math.min(...allValues);
+    const maxVal = Math.max(...allValues);
     const pad = Math.max((maxVal - minVal) * 0.12, 1);
 
     return {
@@ -239,7 +244,9 @@ function renderHoldingsChart(holdings, currentValue) {
       label: {
         color: '#8b949e',
         fontSize: 11,
-        formatter: '{b}\n{d}%',
+        // 用切片自身的 value(即 weight_current_pct)而不是 ECharts 的 {d}(占图内数据总和的比例,
+        // 因为现金不计入这个饼图, 总和不到100%, {d}% 会和悬浮提示/表格里的数字对不上)
+        formatter: (p) => `${p.name}\n${p.value}%`,
       },
       labelLine: { lineStyle: { color: '#30363d' } },
       data: holdings.map((h, i) => ({

@@ -57,6 +57,24 @@ def test_rebalance_uses_last_trading_day_of_quarter():
     assert res['rebalances'][0]['date'] == '2026-03-30'
 
 
+def test_rebalances_continue_past_hardcoded_horizon():
+    """回归: _quarter_ends 曾经硬编码 end_year=2027, 组合运行到 2028 年后
+    会因为找不到未来季末候选日期而静默停止再平衡。"""
+    dates = pd.date_range('2026-01-05', '2028-06-30', freq='B')
+    closes = {
+        'A': _closes(dates, 2.0, 0.0002),
+        'B': _closes(dates, 5.0, -0.0001),
+    }
+    res = run_portfolio(
+        closes,
+        [('A', 0.6), ('B', 0.4)],
+        start='2026-01-05',
+        initial=100000,
+    )
+    rb_years = {pd.Timestamp(rb['date']).year for rb in res['rebalances']}
+    assert 2028 in rb_years
+
+
 def test_weights_must_sum_to_one():
     dates = pd.date_range('2026-01-05', '2026-02-05', freq='B')
     closes = {'A': _closes(dates, 2.0, 0.0), 'B': _closes(dates, 5.0, 0.0)}

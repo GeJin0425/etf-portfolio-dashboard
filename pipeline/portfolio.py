@@ -10,7 +10,7 @@ def _fee(notional, comm, min_comm):
     return max(notional * comm, min_comm)
 
 
-def _quarter_ends(start_year=2026, end_year=2027):
+def _quarter_ends(start_year, end_year):
     ends = []
     for year in range(start_year, end_year + 1):
         for month in (3, 6, 9, 12):
@@ -34,7 +34,7 @@ def run_portfolio(closes, weights, start='2026-01-05', initial=100000,
         raise ValueError('起始日缺少某只标的的价格')
 
     rb_dates = set()
-    for qe in _quarter_ends():
+    for qe in _quarter_ends(pd.Timestamp(start).year, common[-1].year):
         if qe > common[-1]:
             continue  # 季度末尚未到来, 不能提前触发
         candidates = [d for d in common if d <= qe]
@@ -92,35 +92,42 @@ def run_portfolio(closes, weights, start='2026-01-05', initial=100000,
                         'fee': round(f, 2),
                     })
 
+            buy_needs = []
             for code, _ in weights:
                 cur, tgt = shares[code], targets[code]
                 if cur < tgt:
                     p = float(aligned[code].loc[d])
-                    need = tgt - cur
-                    amount = need * p
-                    f = fee(amount)
-                    if cash >= amount + f:
-                        cash -= amount + f
+                    buy_needs.append((code, cur, tgt, p, (tgt - cur) * p))
+            # 现金不足以覆盖全部买入目标时, 优先满足偏离目标权重最多(金额最大)的资产,
+            # 避免固定按 ASSETS 顺序导致排在后面的资产总是被牺牲
+            buy_needs.sort(key=lambda item: -item[4])
+
+            for code, cur, tgt, p, _ in buy_needs:
+                need = tgt - cur
+                amount = need * p
+                f = fee(amount)
+                if cash >= amount + f:
+                    cash -= amount + f
+                    total_fee += f
+                    shares[code] = tgt
+                    trades.append({
+                        'code': code, 'action': '买入', 'shares': need,
+                        'price': round(p, 3), 'amount': round(amount, 2),
+                        'fee': round(f, 2),
+                    })
+                else:
+                    s = int((cash - fee(cash)) / p / 100) * 100
+                    if s > 0:
+                        amount = s * p
+                        f = fee(amount)
                         total_fee += f
-                        shares[code] = tgt
+                        cash -= amount + f
+                        shares[code] = cur + s
                         trades.append({
-                            'code': code, 'action': '买入', 'shares': need,
+                            'code': code, 'action': '买入(部分)', 'shares': s,
                             'price': round(p, 3), 'amount': round(amount, 2),
                             'fee': round(f, 2),
                         })
-                    else:
-                        s = int((cash - fee(cash)) / p / 100) * 100
-                        if s > 0:
-                            amount = s * p
-                            f = fee(amount)
-                            total_fee += f
-                            cash -= amount + f
-                            shares[code] = cur + s
-                            trades.append({
-                                'code': code, 'action': '买入(部分)', 'shares': s,
-                                'price': round(p, 3), 'amount': round(amount, 2),
-                                'fee': round(f, 2),
-                            })
 
             v_after = value_at(d)
             fees_paid += total_fee

@@ -9,12 +9,11 @@ import pandas as pd
 
 from .fetch import (
     ASSETS,
-    BENCHMARKS,
     FEE_MIN,
     FEE_RATE,
     INITIAL_CAPITAL,
     START_DATE,
-    fetch_close,
+    fetch_all,
 )
 from .portfolio import run_portfolio
 
@@ -43,19 +42,29 @@ def next_rebalance_date(last_date):
     last = pd.Timestamp(last_date)
     for year in range(last.year, last.year + 2):
         for month in (3, 6, 9, 12):
-            end = pd.Timestamp(f'{year}-{month:02d}-28') + pd.offsets.MonthEnd(0)
+            # 用最后一个工作日近似实际交易日(无法预知未来的交易所假期);
+            # 真正触发的再平衡日以 portfolio.run_portfolio 的历史交易日为准
+            end = pd.Timestamp(f'{year}-{month:02d}-01') + pd.offsets.BMonthEnd(0)
             if end > last:
                 return end.strftime('%Y-%m-%d')
     return None
 
 
 def ytd_return(close_series, end_date, base_date='2025-12-31'):
-    """官方口径 YTD: 以上年最后一个交易日收盘为基准"""
+    """官方口径 YTD: 以上年最后一个交易日收盘为基准。
+
+    close_series 使用自己的交易日历(如美股), end_date 来自组合的A股交易日历,
+    两者可能在假日错位, 因此用 asof 取 end_date 当日或之前最近一个有效收盘价,
+    而不是精确匹配日期(精确匹配在日历错位时会 KeyError)。
+    """
     base = close_series[close_series.index <= pd.Timestamp(base_date)]
     if base.empty:
         return None
     start = float(base.iloc[-1])
-    end = float(close_series.loc[pd.Timestamp(end_date)])
+    end_val = close_series.asof(pd.Timestamp(end_date))
+    if pd.isna(end_val):
+        return None
+    end = float(end_val)
     return round((end / start - 1) * 100, 2)
 
 
@@ -93,8 +102,7 @@ def enrich_rebalances(rebalances):
 
 
 def export(output_path):
-    closes = {a['code']: fetch_close(a) for a in ASSETS}
-    bench = {b['code']: fetch_close(b) for b in BENCHMARKS}
+    closes, bench = fetch_all()
 
     result = run_portfolio(
         closes,
@@ -107,8 +115,10 @@ def export(output_path):
     equity = result['equity']
     dates = [d.strftime('%Y-%m-%d') for d in equity.index]
 
-    csi = bench['000300'].reindex(equity.index).ffill()
-    spx = bench['SPX'].reindex(equity.index).ffill()
+    # ffill 无法回补序列最前面的缺口(基准历史晚于组合起始日时会出现),
+    # 再 bfill 一次保证归一化基准点(iloc[0])一定有值, 避免整条收益率曲线变 NaN
+    csi = bench['000300'].reindex(equity.index).ffill().bfill()
+    spx = bench['SPX'].reindex(equity.index).ffill().bfill()
     csi_ret = (csi / csi.iloc[0] - 1) * 100
     spx_ret = (spx / spx.iloc[0] - 1) * 100
     port_ret = (equity / INITIAL_CAPITAL - 1) * 100
@@ -133,7 +143,7 @@ def export(output_path):
     holdings = []
     for a in ASSETS:
         code = a['code']
-        series = closes[code]
+        series = result['aligned'][code]
         p0 = float(series.loc[equity.index[0]])
         p1 = float(series.loc[equity.index[-1]])
         value = result['shares'][code] * p1

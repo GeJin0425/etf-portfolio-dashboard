@@ -32,6 +32,27 @@ def test_fetch_close_falls_back_to_tencent(monkeypatch):
     assert calls == ['em', 'tx']
 
 
+def test_fetch_tx_respects_qfq_flag(monkeypatch):
+    """回归: fetch_tx 曾经无视 defn['qfq'], 对所有CN代码都强制走前复权端点,
+    导致 qfq=False 的基准(如沪深300)在腾讯兜底源上永远拿不到不复权数据。"""
+    captured = {}
+
+    class FakeResp:
+        def json(self):
+            return {'data': {'sh000300': {'day': [
+                ['2026-01-05', '1', '1', '1', '1', '10'],
+            ]}}}
+
+    def fake_get(url, headers, timeout):
+        captured['url'] = url
+        return FakeResp()
+
+    monkeypatch.setattr(fetch.requests, 'get', fake_get)
+    df = fetch.fetch_tx({'tx': 'sh000300', 'qfq': False})
+    assert df is not None
+    assert ',qfq' not in captured['url']
+
+
 def test_sina_us_parser(monkeypatch):
     class FakeResp:
         text = 'var _data=([{"d":"2026-01-02","o":"1","h":"2","l":"0.5","c":"1.5","v":"1","a":"2"}]);'

@@ -5,6 +5,7 @@
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 import requests
@@ -81,7 +82,7 @@ def fetch_em(defn, limit=1600):
 
 
 def fetch_tx(defn, limit=1600):
-    """腾讯日K: CN走fqkline(优先qfq), 美股指数走kline"""
+    """腾讯日K: CN走fqkline(按defn['qfq']决定复权/不复权), 美股指数走kline"""
     code = defn['tx']
     if code.startswith('us'):
         url = (
@@ -89,18 +90,22 @@ def fetch_tx(defn, limit=1600):
             f'?param={code},day,,,{limit}'
         )
         key = 'us.' + code[2:]
+        row_key = 'day'
     else:
+        qfq = defn.get('qfq', True)
+        suffix = ',qfq' if qfq else ''
         url = (
             f'http://web.ifzq.gtimg.cn/appstock/app/fqkline/get'
-            f'?param={code},day,,,{limit},qfq'
+            f'?param={code},day,,,{limit}{suffix}'
         )
         key = code
+        row_key = 'qfqday' if qfq else 'day'
     for attempt in range(3):
         try:
             resp = requests.get(url, headers=UA, timeout=20)
             payload = resp.json()
             node = payload['data'][key]
-            rows = node.get('qfqday') or node.get('day')
+            rows = node.get(row_key) or node.get('day') or node.get('qfqday')
             if rows:
                 return _to_close_df(rows)
         except Exception:
@@ -109,7 +114,7 @@ def fetch_tx(defn, limit=1600):
     return None
 
 
-def fetch_sina_us(defn, start='2026-01-01'):
+def fetch_sina_us(defn, start='2015-01-01'):
     """新浪美股指数日K备用(标普500)"""
     if not defn.get('sina'):
         return None
@@ -156,6 +161,13 @@ def fetch_close(defn, limit=1600):
 
 
 def fetch_all():
-    closes = {a['code']: fetch_close(a) for a in ASSETS}
-    bench = {b['code']: fetch_close(b) for b in BENCHMARKS}
+    """并发拉取全部资产与基准的收盘价序列(6个独立数据源, 互不依赖)"""
+    defs = ASSETS + BENCHMARKS
+    with ThreadPoolExecutor(max_workers=len(defs)) as pool:
+        series_by_code = dict(zip(
+            (d['code'] for d in defs),
+            pool.map(fetch_close, defs),
+        ))
+    closes = {a['code']: series_by_code[a['code']] for a in ASSETS}
+    bench = {b['code']: series_by_code[b['code']] for b in BENCHMARKS}
     return closes, bench
