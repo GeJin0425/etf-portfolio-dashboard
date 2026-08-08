@@ -119,8 +119,10 @@ def export(output_path):
     # 再 bfill 一次保证归一化基准点(iloc[0])一定有值, 避免整条收益率曲线变 NaN
     csi = bench['000300'].reindex(equity.index).ffill().bfill()
     spx = bench['SPX'].reindex(equity.index).ffill().bfill()
+    ndx = bench['NDX'].reindex(equity.index).ffill().bfill()
     csi_ret = (csi / csi.iloc[0] - 1) * 100
     spx_ret = (spx / spx.iloc[0] - 1) * 100
+    ndx_ret = (ndx / ndx.iloc[0] - 1) * 100
     port_ret = (equity / INITIAL_CAPITAL - 1) * 100
     dd = (equity - equity.cummax()) / equity.cummax() * 100
 
@@ -128,11 +130,14 @@ def export(output_path):
     stats.update({
         'csi300_return_pct': round(float(csi_ret.iloc[-1]), 2),
         'sp500_return_pct': round(float(spx_ret.iloc[-1]), 2),
+        'ndx100_return_pct': round(float(ndx_ret.iloc[-1]), 2),
         'csi300_ytd_pct': ytd_return(bench['000300'], dates[-1]),
         'sp500_ytd_pct': ytd_return(bench['SPX'], dates[-1]),
+        'ndx100_ytd_pct': ytd_return(bench['NDX'], dates[-1]),
         'ytd_base_date': '2025-12-31',
         'excess_csi300_pct': round(float(port_ret.iloc[-1] - csi_ret.iloc[-1]), 2),
         'excess_sp500_pct': round(float(port_ret.iloc[-1] - spx_ret.iloc[-1]), 2),
+        'excess_ndx100_pct': round(float(port_ret.iloc[-1] - ndx_ret.iloc[-1]), 2),
         'rebalance_count': len(result['rebalances']),
         'total_fees': round(float(result['fees_paid']), 2),
         'current_value': round(float(equity.iloc[-1]), 2),
@@ -176,6 +181,7 @@ def export(output_path):
             'portfolio': _round_list(port_ret),
             'csi300': _round_list(csi_ret),
             'sp500': _round_list(spx_ret),
+            'ndx100': _round_list(ndx_ret),
             'drawdown': _round_list(dd),
             'value': _round_list(equity, 0),
         },

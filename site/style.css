@@ -58,10 +58,11 @@ body {
 
 .kpi-row {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(7, 1fr);
   gap: 10px;
   margin-bottom: 14px;
 }
+@media (max-width: 1100px) { .kpi-row { grid-template-columns: repeat(4, 1fr); } }
 @media (max-width: 900px) { .kpi-row { grid-template-columns: repeat(3, 1fr); } }
 @media (max-width: 560px) { .kpi-row { grid-template-columns: repeat(2, 1fr); } }
 

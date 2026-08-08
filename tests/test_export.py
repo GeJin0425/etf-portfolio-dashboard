@@ -5,7 +5,7 @@ import pandas as pd
 from pipeline import export
 
 BASES = {'159263': 1.0, '161130': 4.0, '161125': 3.0, '518850': 8.0}
-BENCH_BASES = {'000300': 4500.0, 'SPX': 6800.0}
+BENCH_BASES = {'000300': 4500.0, 'SPX': 6800.0, 'NDX': 20000.0}
 
 
 def _series(dates, base):
@@ -35,12 +35,14 @@ def test_export_builds_payload(tmp_path, monkeypatch):
     assert data['meta']['total_return_pct'] is not None
     assert data['meta']['csi300_ytd_pct'] is not None
     assert data['meta']['sp500_ytd_pct'] is not None
+    assert data['meta']['ndx100_ytd_pct'] is not None
     assert data['meta']['current_value'] > 100000
     assert len(data['holdings']) == 4
     assert len(data['rebalances']) == 2
     assert len(data['series']['dates']) == len(data['series']['portfolio'])
     assert len(data['series']['dates']) == len(data['series']['csi300'])
     assert len(data['series']['dates']) == len(data['series']['sp500'])
+    assert len(data['series']['dates']) == len(data['series']['ndx100'])
     assert data['series']['portfolio'][0] == 0.0
 
 
@@ -56,6 +58,7 @@ def test_export_survives_us_holiday_on_last_cn_trading_day(tmp_path, monkeypatch
         bench_dates_by_code={
             '000300': bench_dates_missing_last,
             'SPX': bench_dates_missing_last,
+            'NDX': bench_dates_missing_last,
         },
     )
     monkeypatch.setattr(export, 'fetch_all', lambda: (closes, bench))
@@ -65,8 +68,10 @@ def test_export_survives_us_holiday_on_last_cn_trading_day(tmp_path, monkeypatch
 
     assert payload['meta']['sp500_ytd_pct'] is not None
     assert payload['meta']['csi300_ytd_pct'] is not None
+    assert payload['meta']['ndx100_ytd_pct'] is not None
     assert payload['series']['sp500'][-1] is not None
     assert payload['series']['csi300'][-1] is not None
+    assert payload['series']['ndx100'][-1] is not None
 
 
 def test_export_holdings_survive_asset_data_gap(tmp_path, monkeypatch):
@@ -92,7 +97,7 @@ def test_export_benchmark_return_not_nan_when_history_starts_late(tmp_path, monk
     bench_dates_late = pd.DatetimeIndex(etf_dates[1:])  # 第一个交易日没有基准数据
     closes, bench = _make_fake_fetch_all(
         etf_dates,
-        bench_dates_by_code={'000300': bench_dates_late, 'SPX': bench_dates_late},
+        bench_dates_by_code={'000300': bench_dates_late, 'SPX': bench_dates_late, 'NDX': bench_dates_late},
     )
     monkeypatch.setattr(export, 'fetch_all', lambda: (closes, bench))
 
@@ -101,3 +106,4 @@ def test_export_benchmark_return_not_nan_when_history_starts_late(tmp_path, monk
 
     assert all(v is not None for v in payload['series']['sp500'])
     assert all(v is not None for v in payload['series']['csi300'])
+    assert all(v is not None for v in payload['series']['ndx100'])

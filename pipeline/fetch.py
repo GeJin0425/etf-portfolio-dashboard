@@ -27,6 +27,7 @@ ASSETS = [
 BENCHMARKS = [
     {'code': '000300', 'name': '沪深300', 'em': '1.000300', 'tx': 'sh000300', 'sina': None, 'qfq': False},
     {'code': 'SPX', 'name': '标普500', 'em': '100.SPX', 'tx': 'usINX', 'sina': '.INX', 'qfq': False},
+    {'code': 'NDX', 'name': '纳斯达克100', 'em': '100.NDX100', 'tx': 'usNDX', 'sina': '.NDX', 'qfq': False},
 ]
 
 START_DATE = '2026-01-05'

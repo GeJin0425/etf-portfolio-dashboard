@@ -79,6 +79,7 @@ function renderTopbar(data) {
 function renderKpis(meta) {
   const csiYtd = meta.csi300_ytd_pct == null ? '' : ` · YTD ${fmtSigned(meta.csi300_ytd_pct)}`;
   const spxYtd = meta.sp500_ytd_pct == null ? '' : ` · YTD ${fmtSigned(meta.sp500_ytd_pct)}`;
+  const ndxYtd = meta.ndx100_ytd_pct == null ? '' : ` · YTD ${fmtSigned(meta.ndx100_ytd_pct)}`;
   const cards = [
     { value: fmtSigned(meta.total_return_pct), label: '组合总收益', sub: `净值 ${fmtMoney(meta.current_value)}` },
     { value: fmtSigned(meta.annualized_pct), label: '年化收益' },
@@ -86,6 +87,7 @@ function renderKpis(meta) {
     { value: meta.sharpe.toFixed(2), label: '夏普比率', plain: true },
     { value: fmtSigned(meta.excess_csi300_pct), label: '超额 vs 沪深300', sub: `沪深300 ${fmtSigned(meta.csi300_return_pct)}(建仓)${csiYtd}` },
     { value: fmtSigned(meta.excess_sp500_pct), label: '超额 vs 标普500', sub: `标普500 ${fmtSigned(meta.sp500_return_pct)}(建仓)${spxYtd}` },
+    { value: fmtSigned(meta.excess_ndx100_pct), label: '超额 vs 纳斯达克100', sub: `纳斯达克100 ${fmtSigned(meta.ndx100_return_pct)}(建仓)${ndxYtd}` },
   ];
   document.getElementById('kpi-row').innerHTML = cards.map(c => `
     <div class="kpi-card">
@@ -100,8 +102,9 @@ function renderBenchmarkNote(meta) {
   const note = document.getElementById('benchmark-note');
   const csi = meta.csi300_ytd_pct == null ? '--' : fmtSigned(meta.csi300_ytd_pct);
   const spx = meta.sp500_ytd_pct == null ? '--' : fmtSigned(meta.sp500_ytd_pct);
+  const ndx = meta.ndx100_ytd_pct == null ? '--' : fmtSigned(meta.ndx100_ytd_pct);
   note.textContent =
-    `主图收益比较以建仓日 ${meta.start_date} 收盘为起点(与组合实际买入日对齐); 官方2026 YTD(自${meta.ytd_base_date}收盘): 沪深300 ${csi} · 标普500 ${spx}`;
+    `主图收益比较以建仓日 ${meta.start_date} 收盘为起点(与组合实际买入日对齐); 官方2026 YTD(自${meta.ytd_base_date}收盘): 沪深300 ${csi} · 标普500 ${spx} · 纳斯达克100 ${ndx}`;
 }
 
 function renderMainChart(series) {
@@ -133,7 +136,7 @@ function renderMainChart(series) {
   function buildOption(start) {
     const dates = allDates.slice(start);
     const s = (arr) => arr.slice(start);
-    const allValues = numericValues(s(series.portfolio), s(series.csi300), s(series.sp500));
+    const allValues = numericValues(s(series.portfolio), s(series.csi300), s(series.sp500), s(series.ndx100));
     const minVal = Math.min(...allValues);
     const maxVal = Math.max(...allValues);
     const pad = Math.max((maxVal - minVal) * 0.12, 1);
@@ -154,7 +157,7 @@ function renderMainChart(series) {
         },
       },
       legend: {
-        data: ['我的组合', '沪深300', '标普500'],
+        data: ['我的组合', '沪深300', '标普500', '纳斯达克100'],
         textStyle: { color: '#8b949e' },
         top: 0,
         itemWidth: 18,
@@ -207,6 +210,16 @@ function renderMainChart(series) {
           smooth: 0.15,
           lineStyle: { width: 1.6, color: COLORS.gold, type: 'dotted' },
           itemStyle: { color: COLORS.gold },
+          z: 2,
+        },
+        {
+          name: '纳斯达克100',
+          type: 'line',
+          data: s(series.ndx100),
+          showSymbol: false,
+          smooth: 0.15,
+          lineStyle: { width: 1.6, color: COLORS.purple, type: 'dashed' },
+          itemStyle: { color: COLORS.purple },
           z: 2,
         },
       ],
