@@ -172,7 +172,6 @@ function renderMainChart(series) {
         splitLine: { lineStyle: { color: '#161b22' } },
       },
       dataZoom: [
-        { type: 'inside' },
         { type: 'slider', backgroundColor: '#11151d', fillerColor: 'rgba(88,166,255,0.12)', borderColor: '#21262d' },
       ],
       series: [
@@ -365,7 +364,9 @@ function renderDrawdownChart(series) {
       axisLabel: { color: '#8b949e', formatter: (v) => `${v}%` },
       splitLine: { lineStyle: { color: '#161b22' } },
     },
-    dataZoom: [{ type: 'inside' }],
+    dataZoom: [
+      { type: 'slider', backgroundColor: '#11151d', fillerColor: 'rgba(88,166,255,0.12)', borderColor: '#21262d' },
+    ],
     series: [{
       type: 'line',
       data: series.drawdown,
