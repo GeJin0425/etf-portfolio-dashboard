@@ -26,9 +26,10 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - run: python -m pipeline.export
-      - name: Verify generated data.json is valid
-        run: python -c "import json; json.load(open('site/data.json'))" && echo "data.json is valid JSON"
+      - name: Build with per-source exchange-session freshness validation
+        run: python -m pipeline.export
+      - name: Verify generated data before upload
+        run: python -m pipeline.export --validate site/data.json
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site

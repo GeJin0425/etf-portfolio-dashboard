@@ -1,20 +1,25 @@
 """生成看板所需的 site/data.json"""
 
+import argparse
 import json
 import os
-from datetime import datetime, timedelta, timezone
+import tempfile
+from datetime import date
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 
 from .fetch import (
     ASSETS,
+    BENCHMARKS,
     FEE_MIN,
     FEE_RATE,
     INITIAL_CAPITAL,
     START_DATE,
     fetch_all,
 )
+from .freshness import FreshnessError, utc_now, validate_quote_date, validate_series
 from .portfolio import run_portfolio
 
 
@@ -101,8 +106,53 @@ def enrich_rebalances(rebalances):
     return out
 
 
-def export(output_path):
-    closes, bench = fetch_all()
+def validate_payload_freshness(payload, *, now=None):
+    """Independent pre-upload gate; valid JSON alone does not imply fresh data."""
+    now = utc_now(now)
+    try:
+        meta = payload['meta']
+        sources = meta['source_dates']
+        for defn in ASSETS + BENCHMARKS:
+            actual = date.fromisoformat(sources[defn['code']]['actual'])
+            expected = validate_quote_date(actual, defn, now)
+            if (sources[defn['code']]['expected'] != expected
+                    or sources[defn['code']]['market'] != defn['market']):
+                raise FreshnessError(f'{defn["code"]}: inconsistent freshness metadata')
+        if (meta['as_of_date'] != sources[ASSETS[0]['code']]['actual']
+                or payload['series']['dates'][-1] != meta['as_of_date']):
+            raise FreshnessError('Portfolio date does not match validated asset dates')
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        if isinstance(exc, FreshnessError):
+            raise
+        raise FreshnessError(f'Missing/invalid freshness metadata: {exc}') from exc
+
+
+def _write_atomic(output_path, payload):
+    """Never truncate the previous artifact on serialization or replace failure."""
+    content = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
+    directory = os.path.dirname(os.path.abspath(output_path))
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                mode='w', encoding='utf-8', dir=directory,
+                prefix='.data-', suffix='.tmp', delete=False) as f:
+            temporary = f.name
+            f.write(content)
+        os.replace(temporary, output_path)
+    finally:
+        if temporary is not None and os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def export(output_path, *, now=None):
+    now = utc_now(now)
+    closes, bench = fetch_all(now=now)
+    # Re-check each raw input before union+ffill, including mocked/cached callers.
+    source_dates = {
+        defn['code']: validate_series(
+            (closes if defn in ASSETS else bench)[defn['code']], defn, now)
+        for defn in ASSETS + BENCHMARKS
+    }
 
     result = run_portfolio(
         closes,
@@ -163,13 +213,14 @@ def export(output_path):
             'return_pct': round((p1 / p0 - 1) * 100, 2),
         })
 
-    beijing_now = datetime.now(timezone(timedelta(hours=8)))
+    beijing_now = now.astimezone(ZoneInfo('Asia/Shanghai'))
     payload = {
         'meta': {
             **stats,
             'start_date': START_DATE,
             'as_of_date': dates[-1],
             'updated_at': beijing_now.isoformat(),
+            'source_dates': source_dates,
             'initial_capital': INITIAL_CAPITAL,
             'fee_rate': FEE_RATE,
             'min_fee': FEE_MIN,
@@ -188,12 +239,20 @@ def export(output_path):
         'rebalances': enrich_rebalances(result['rebalances']),
     }
 
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2, allow_nan=False)
+    validate_payload_freshness(payload, now=now)
+    _write_atomic(output_path, payload)
     return payload
 
 
 if __name__ == '__main__':
-    site_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'site')
-    os.makedirs(site_dir, exist_ok=True)
-    export(os.path.join(site_dir, 'data.json'))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--validate', metavar='PATH', help='仅校验已有产物的逐标的新鲜度')
+    args = parser.parse_args()
+    if args.validate:
+        with open(args.validate, encoding='utf-8') as f:
+            validate_payload_freshness(json.load(f))
+        print('data.json quote dates match the latest completed exchange sessions')
+    else:
+        site_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'site')
+        os.makedirs(site_dir, exist_ok=True)
+        export(os.path.join(site_dir, 'data.json'))

@@ -1,4 +1,6 @@
 import pandas as pd
+import pytest
+from datetime import datetime, timezone
 
 from pipeline import fetch
 
@@ -27,7 +29,9 @@ def test_fetch_close_falls_back_to_tencent(monkeypatch):
 
     monkeypatch.setattr(fetch, 'fetch_em', fake_em)
     monkeypatch.setattr(fetch, 'fetch_tx', fake_tx)
-    s = fetch.fetch_close({'code': 'X', 'name': '测试', 'tx': 'szX', 'qfq': True})
+    s = fetch.fetch_close(
+        {'code': 'X', 'name': '测试', 'market': 'XSHE', 'tx': 'szX', 'qfq': True},
+        now=datetime(2026, 4, 10, 8, tzinfo=timezone.utc))
     assert len(s) == 70
     assert calls == ['em', 'tx']
 
@@ -70,3 +74,52 @@ def test_sina_us_parser(monkeypatch):
     df = fetch.fetch_sina_us({'sina': '.INX'})
     assert df is not None
     assert float(df['close'].iloc[-1]) == 1.5
+
+
+def _history(last):
+    dates = pd.bdate_range(end=last, periods=70)
+    return pd.DataFrame({'close': [1.0] * len(dates)}, index=dates)
+
+
+def test_fetch_close_falls_back_when_primary_has_long_but_stale_history(monkeypatch):
+    monkeypatch.setattr(fetch, 'fetch_em', lambda *args, **kwargs: _history('2026-07-14'))
+    monkeypatch.setattr(fetch, 'fetch_tx', lambda *args, **kwargs: _history('2026-07-15'))
+    series = fetch.fetch_close(fetch.ASSETS[0], now=datetime(2026, 7, 15, 22, tzinfo=timezone.utc))
+    assert series.index[-1] == pd.Timestamp('2026-07-15')
+
+
+def test_fetch_close_falls_back_from_future_dated_primary(monkeypatch):
+    monkeypatch.setattr(fetch, 'fetch_em', lambda *args, **kwargs: _history('2026-07-16'))
+    monkeypatch.setattr(fetch, 'fetch_tx', lambda *args, **kwargs: _history('2026-07-15'))
+    series = fetch.fetch_close(fetch.ASSETS[0], now=datetime(2026, 7, 15, 22, tzinfo=timezone.utc))
+    assert series.index[-1] == pd.Timestamp('2026-07-15')
+
+
+def test_fetch_close_falls_back_to_fresh_sina_us(monkeypatch):
+    monkeypatch.setattr(fetch, 'fetch_em', lambda *args, **kwargs: _history('2026-07-14'))
+    monkeypatch.setattr(fetch, 'fetch_tx', lambda *args, **kwargs: _history('2026-07-14'))
+    monkeypatch.setattr(fetch, 'fetch_sina_us', lambda *args: _history('2026-07-15'))
+    series = fetch.fetch_close(fetch.BENCHMARKS[1], now=datetime(2026, 7, 15, 22, tzinfo=timezone.utc))
+    assert series.index[-1] == pd.Timestamp('2026-07-15')
+
+
+def test_fetch_close_reports_all_stale_sources(monkeypatch):
+    monkeypatch.setattr(fetch, 'fetch_em', lambda *args, **kwargs: _history('2026-07-14'))
+    monkeypatch.setattr(fetch, 'fetch_tx', lambda *args, **kwargs: _history('2026-07-14'))
+    with pytest.raises(RuntimeError, match='eastmoney:.*stale.*tencent:.*stale'):
+        fetch.fetch_close(fetch.ASSETS[0], now=datetime(2026, 7, 15, 22, tzinfo=timezone.utc))
+
+
+def test_fetch_all_uses_one_clock_for_all_symbols(monkeypatch):
+    seen = []
+    now = datetime(2026, 10, 1, 1, tzinfo=timezone.utc)
+
+    def fake_close(defn, *, now):
+        seen.append(now)
+        return _history('2026-09-30')['close']
+
+    monkeypatch.setattr(fetch, 'fetch_close', fake_close)
+    closes, bench = fetch.fetch_all(now=now)
+    assert len(seen) == 7 and all(stamp == now for stamp in seen)
+    assert set(closes) == {a['code'] for a in fetch.ASSETS}
+    assert set(bench) == {b['code'] for b in fetch.BENCHMARKS}
