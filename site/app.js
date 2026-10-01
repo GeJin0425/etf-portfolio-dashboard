@@ -64,6 +64,14 @@ function fmtSigned(value, suffix = '%') {
   return `${sign}${Number(value).toFixed(2)}${suffix}`;
 }
 
+function fmtAxisPercent(value, signed = false) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--';
+  // ECharts can pass padded axis bounds with floating-point tails. Round only
+  // the label, preserve the plotted values, and avoid a misleading negative zero.
+  const rounded = Number(Number(value).toFixed(2));
+  return `${signed && rounded > 0 ? '+' : ''}${rounded}%`;
+}
+
 function fmtMoney(value) {
   return `¥${Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 0 })}`;
 }
@@ -168,7 +176,7 @@ function renderMainChart(series) {
         type: 'value',
         min: minVal - pad,
         max: maxVal + pad,
-        axisLabel: { color: '#8b949e', formatter: (v) => `${v > 0 ? '+' : ''}${v}%` },
+        axisLabel: { color: '#8b949e', formatter: (v) => fmtAxisPercent(v, true) },
         splitLine: { lineStyle: { color: '#161b22' } },
       },
       dataZoom: [
@@ -361,7 +369,7 @@ function renderDrawdownChart(series) {
     yAxis: {
       type: 'value',
       max: 0,
-      axisLabel: { color: '#8b949e', formatter: (v) => `${v}%` },
+      axisLabel: { color: '#8b949e', formatter: (v) => fmtAxisPercent(v) },
       splitLine: { lineStyle: { color: '#161b22' } },
     },
     dataZoom: [
