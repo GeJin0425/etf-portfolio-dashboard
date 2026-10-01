@@ -6,9 +6,12 @@
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 import pandas as pd
 import requests
+
+from .freshness import FreshnessError, utc_now, validate_series
 
 UA = {
     'User-Agent': (
@@ -18,16 +21,16 @@ UA = {
 }
 
 ASSETS = [
-    {'code': '159263', 'name': '价值ETF易方达', 'em': '0.159263', 'tx': 'sz159263', 'qfq': True, 'weight': 0.38},
-    {'code': '161130', 'name': '纳斯达克100LOF', 'em': '0.161130', 'tx': 'sz161130', 'qfq': True, 'weight': 0.28},
-    {'code': '161125', 'name': '标普500LOF', 'em': '0.161125', 'tx': 'sz161125', 'qfq': True, 'weight': 0.22},
-    {'code': '518850', 'name': '黄金ETF华夏', 'em': '1.518850', 'tx': 'sh518850', 'qfq': True, 'weight': 0.12},
+    {'code': '159263', 'name': '价值ETF易方达', 'market': 'XSHE', 'em': '0.159263', 'tx': 'sz159263', 'qfq': True, 'weight': 0.38},
+    {'code': '161130', 'name': '纳斯达克100LOF', 'market': 'XSHE', 'em': '0.161130', 'tx': 'sz161130', 'qfq': True, 'weight': 0.28},
+    {'code': '161125', 'name': '标普500LOF', 'market': 'XSHE', 'em': '0.161125', 'tx': 'sz161125', 'qfq': True, 'weight': 0.22},
+    {'code': '518850', 'name': '黄金ETF华夏', 'market': 'XSHG', 'em': '1.518850', 'tx': 'sh518850', 'qfq': True, 'weight': 0.12},
 ]
 
 BENCHMARKS = [
-    {'code': '000300', 'name': '沪深300', 'em': '1.000300', 'tx': 'sh000300', 'sina': None, 'qfq': False},
-    {'code': 'SPX', 'name': '标普500', 'em': '100.SPX', 'tx': 'usINX', 'sina': '.INX', 'qfq': False},
-    {'code': 'NDX', 'name': '纳斯达克100', 'em': '100.NDX100', 'tx': 'usNDX', 'sina': '.NDX', 'qfq': False},
+    {'code': '000300', 'name': '沪深300', 'market': 'XSHG', 'em': '1.000300', 'tx': 'sh000300', 'sina': None, 'qfq': False},
+    {'code': 'SPX', 'name': '标普500', 'market': 'US', 'em': '100.SPX', 'tx': 'usINX', 'sina': '.INX', 'qfq': False},
+    {'code': 'NDX', 'name': '纳斯达克100', 'market': 'US', 'em': '100.NDX100', 'tx': 'usNDX', 'sina': '.NDX', 'qfq': False},
 ]
 
 START_DATE = '2026-01-05'
@@ -147,28 +150,38 @@ def fetch_sina_us(defn, start='2015-01-01'):
     return None
 
 
-def fetch_close(defn, limit=1600):
-    """返回前复权/不复权收盘价 Series, 多源按序尝试"""
-    em = fetch_em(defn, limit=limit)
-    if em is not None and len(em) >= 60:
-        return em['close']
-    tx = fetch_tx(defn, limit=limit)
-    if tx is not None and len(tx) >= 60:
-        return tx['close']
+def fetch_close(defn, limit=1600, *, now=None):
+    """多源按序尝试; 足够长但陈旧的主源也必须切换, 不得直接发布。"""
+    now = utc_now(now)
+    sources = [('eastmoney', partial(fetch_em, limit=limit)),
+               ('tencent', partial(fetch_tx, limit=limit))]
     if defn.get('sina'):
-        sina = fetch_sina_us(defn)
-        if sina is not None and len(sina) >= 60:
-            return sina['close']
-    raise RuntimeError(f'无法获取行情: {defn["code"]} {defn["name"]}')
+        sources.append(('sina', fetch_sina_us))
+    errors = []
+    for name, source in sources:
+        df = source(defn)
+        if df is None or len(df) < 60:
+            errors.append(f'{name}: insufficient history')
+            continue
+        try:
+            validate_series(df['close'], defn, now)
+        except FreshnessError as exc:
+            errors.append(f'{name}: {exc}')
+            continue
+        return df['close']
+    raise RuntimeError(
+        f'无法获取有效新鲜行情: {defn["code"]} {defn["name"]}; ' + '; '.join(errors)
+    )
 
 
-def fetch_all():
-    """并发拉取全部资产与基准的收盘价序列(6个独立数据源, 互不依赖)"""
+def fetch_all(*, now=None):
+    """并发拉取全部资产与基准, 共享同一个新鲜度校验时点。"""
+    now = utc_now(now)
     defs = ASSETS + BENCHMARKS
     with ThreadPoolExecutor(max_workers=len(defs)) as pool:
         series_by_code = dict(zip(
             (d['code'] for d in defs),
-            pool.map(fetch_close, defs),
+            pool.map(partial(fetch_close, now=now), defs),
         ))
     closes = {a['code']: series_by_code[a['code']] for a in ASSETS}
     bench = {b['code']: series_by_code[b['code']] for b in BENCHMARKS}
