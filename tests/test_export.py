@@ -7,8 +7,9 @@ from datetime import datetime, timezone
 import pandas as pd
 import pytest
 
-from pipeline import export
+from pipeline import export, fetch
 from pipeline.freshness import FreshnessError
+from pipeline.portfolio import run_portfolio
 
 BASES = {'159263': 1.0, '161130': 4.0, '161125': 3.0, '518850': 8.0}
 BENCH_BASES = {'000300': 4500.0, 'SPX': 6800.0, 'NDX': 20000.0}
@@ -64,6 +65,7 @@ def test_export_replaces_value_sleeve_after_quarter_end(tmp_path, monkeypatch):
     })
     closes['159263'] = closes['159263'].loc[:'2026-09-30']
     monkeypatch.setattr(export, 'fetch_all', lambda **kwargs: (closes, bench))
+    monkeypatch.setattr(export, 'validate_pre_q4_equity', lambda equity: None)
     monkeypatch.setattr(export, 'fetch_feed', lambda as_of: {
         'as_of_date': as_of, 'version': 'flow_z20_on_b2_b3__next_open_candidate_a',
         'switch_asset': '511260', 'pending_signal': None,
@@ -85,6 +87,21 @@ def test_export_replaces_value_sleeve_after_quarter_end(tmp_path, monkeypatch):
     ]
     assert payload['meta']['source_dates']['159263']['expected'] == '2026-09-30'
     export.validate_payload_freshness(payload, now=now)
+
+
+def test_pre_q4_portfolio_snapshot_rejects_history_changes():
+    prices = fetch.frozen_pre_q4_prices().loc[:'2026-09-29']
+    result = run_portfolio(
+        {code: prices[code].dropna() for code in prices},
+        [(a['code'], a['weight']) for a in fetch.ASSETS],
+        start=fetch.START_DATE, initial=fetch.INITIAL_CAPITAL,
+        comm=fetch.FEE_RATE, min_comm=fetch.FEE_MIN,
+    )
+    export.validate_pre_q4_equity(result['equity'])
+    altered = result['equity'].copy()
+    altered.iloc[0] += 1
+    with pytest.raises(ValueError, match='历史快照'):
+        export.validate_pre_q4_equity(altered)
 
 
 def test_export_survives_us_holiday_on_last_cn_trading_day(tmp_path, monkeypatch):

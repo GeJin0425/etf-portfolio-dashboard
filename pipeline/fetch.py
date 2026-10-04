@@ -188,13 +188,10 @@ def fetch_close(defn, limit=1600, *, now=None):
     return fetch_quotes(defn, limit=limit, now=now)['close']
 
 
-def fetch_legacy_close(defn):
-    """Freeze sold 159263 shares before later dividends revise QFQ history."""
-    path = Path(__file__).resolve().parents[1] / 'data' / '159263-through-2026-09-30.csv'
-    frame = pd.read_csv(path, parse_dates=['date']).set_index('date')
-    close = frame['close']
-    validate_series(close, defn, LEGACY_LAST_CLOSE)
-    return close
+def frozen_pre_q4_prices():
+    """The original four-asset quote history as it stood at the Q3 close."""
+    path = Path(__file__).resolve().parents[1] / 'data' / 'pre-q4-prices.csv'
+    return pd.read_csv(path, parse_dates=['date']).set_index('date')
 
 
 def fetch_strategy_quotes(*, now=None):
@@ -207,11 +204,21 @@ def fetch_all(*, now=None):
     now = utc_now(now)
     defs = ASSETS + BENCHMARKS
     after_switch = latest_completed_session('XSHE', now).isoformat() > SWITCH_DATE
+    frozen = frozen_pre_q4_prices() if after_switch else None
 
     def read(defn):
-        if after_switch and defn['code'] == '159263':
-            return fetch_legacy_close(defn)
-        return fetch_close(defn, now=now)
+        if not after_switch or defn not in ASSETS:
+            return fetch_close(defn, now=now)
+        before = frozen[defn['code']].dropna()
+        if defn['code'] == '159263':
+            validate_series(before, defn, LEGACY_LAST_CLOSE)
+            return before
+        live = fetch_close(defn, now=now)
+        anchor = pd.Timestamp(SWITCH_DATE)
+        if anchor not in live.index or anchor not in before.index:
+            raise FreshnessError(f'{defn["code"]}: missing Q3 close for price continuity')
+        future = live.loc[live.index > anchor] * (before.loc[anchor] / live.loc[anchor])
+        return pd.concat([before, future])
 
     with ThreadPoolExecutor(max_workers=len(defs)) as pool:
         series_by_code = dict(zip(

@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 from datetime import date
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -110,6 +111,15 @@ def enrich_rebalances(rebalances):
     return out
 
 
+def validate_pre_q4_equity(equity):
+    """Never republish a revised pre-Q4 portfolio curve."""
+    path = Path(__file__).resolve().parents[1] / 'data' / 'pre-q4-portfolio.csv'
+    saved = pd.read_csv(path, parse_dates=['date']).set_index('date')['value']
+    actual = equity.loc[:saved.index[-1]]
+    if not actual.index.equals(saved.index) or not np.allclose(actual, saved, rtol=0, atol=1e-6):
+        raise ValueError('Q4 前组合净值与已固定的历史快照不一致')
+
+
 def validate_payload_freshness(payload, *, now=None):
     """Independent pre-upload gate; valid JSON alone does not imply fresh data."""
     now = utc_now(now)
@@ -183,6 +193,8 @@ def export(output_path, *, now=None):
         bond_opens=strategy_quotes['511260']['open'] if strategy else None,
     )
     equity = result['equity']
+    if strategy:
+        validate_pre_q4_equity(equity)
     dates = [d.strftime('%Y-%m-%d') for d in equity.index]
 
     # ffill 无法回补序列最前面的缺口(基准历史晚于组合起始日时会出现),
