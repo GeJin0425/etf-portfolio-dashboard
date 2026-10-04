@@ -127,17 +127,26 @@ def test_fetch_all_uses_one_clock_for_all_symbols(monkeypatch):
 
 def test_after_switch_legacy_price_is_limited_to_quarter_end(monkeypatch):
     live = _history('2026-10-08')['close']
-    monkeypatch.setattr(fetch, 'fetch_close', lambda defn, *, now: live)
+    live.loc['2026-10-08'] = 1.1
+    fetched = []
+
+    def fake_close(defn, *, now):
+        fetched.append(defn['code'])
+        return live
+
+    monkeypatch.setattr(fetch, 'fetch_close', fake_close)
     closes, _ = fetch.fetch_all(now=datetime(2026, 10, 8, 8, tzinfo=timezone.utc))
     assert closes['159263'].index[-1] == pd.Timestamp('2026-09-30')
     assert closes['161130'].index[-1] == pd.Timestamp('2026-10-08')
-    frozen = fetch.frozen_pre_q4_prices()
-    assert closes['161130'].loc['2026-09-29'] == frozen.loc['2026-09-29', '161130']
-    assert closes['161130'].loc['2026-10-08'] == frozen.loc['2026-09-30', '161130']
+    saved = fetch.load_pre_q4_snapshot()['prices_at_switch']
+    assert closes['161130'].loc['2026-09-30'] == saved['161130']
+    assert closes['161130'].loc['2026-10-08'] == pytest.approx(saved['161130'] * 1.1)
+    assert '159263' not in fetched
 
 
 def test_frozen_legacy_history_ends_at_exit_close():
-    prices = fetch.frozen_pre_q4_prices()
-    assert prices.index[-1] == pd.Timestamp('2026-09-30')
-    assert set(prices.columns) == {a['code'] for a in fetch.ASSETS}
-    assert prices.loc['2026-09-30', '159263'] == 1.133
+    snapshot = fetch.load_pre_q4_snapshot()
+    assert snapshot['through'] == '2026-09-29'
+    assert snapshot['switch_date'] == '2026-09-30'
+    assert set(snapshot['prices_at_switch']) == {a['code'] for a in fetch.ASSETS}
+    assert snapshot['prices_at_switch']['159263'] == 1.133

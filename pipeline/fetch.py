@@ -188,10 +188,13 @@ def fetch_close(defn, limit=1600, *, now=None):
     return fetch_quotes(defn, limit=limit, now=now)['close']
 
 
-def frozen_pre_q4_prices():
-    """The original four-asset quote history as it stood at the Q3 close."""
-    path = Path(__file__).resolve().parents[1] / 'data' / 'pre-q4-prices.csv'
-    return pd.read_csv(path, parse_dates=['date']).set_index('date')
+def load_pre_q4_snapshot():
+    path = Path(__file__).resolve().parents[1] / 'data' / 'pre-q4-snapshot.json'
+    with path.open(encoding='utf-8') as f:
+        snapshot = json.load(f)
+    if snapshot['switch_date'] != SWITCH_DATE or snapshot['through'] != '2026-09-29':
+        raise ValueError('Q4 切换快照日期不匹配')
+    return snapshot
 
 
 def fetch_strategy_quotes(*, now=None):
@@ -203,22 +206,19 @@ def fetch_all(*, now=None):
     """并发拉取全部资产与基准, 共享同一个新鲜度校验时点。"""
     now = utc_now(now)
     defs = ASSETS + BENCHMARKS
-    after_switch = latest_completed_session('XSHE', now).isoformat() > SWITCH_DATE
-    frozen = frozen_pre_q4_prices() if after_switch else None
+    after_switch = latest_completed_session('XSHE', now).isoformat() >= SWITCH_DATE
+    snapshot = load_pre_q4_snapshot() if after_switch else None
+    anchor = pd.Timestamp(SWITCH_DATE)
 
     def read(defn):
         if not after_switch or defn not in ASSETS:
             return fetch_close(defn, now=now)
-        before = frozen[defn['code']].dropna()
         if defn['code'] == '159263':
-            validate_series(before, defn, LEGACY_LAST_CLOSE)
-            return before
+            return pd.Series([snapshot['prices_at_switch'][defn['code']]], index=[anchor])
         live = fetch_close(defn, now=now)
-        anchor = pd.Timestamp(SWITCH_DATE)
-        if anchor not in live.index or anchor not in before.index:
+        if anchor not in live.index:
             raise FreshnessError(f'{defn["code"]}: missing Q3 close for price continuity')
-        future = live.loc[live.index > anchor] * (before.loc[anchor] / live.loc[anchor])
-        return pd.concat([before, future])
+        return live.loc[anchor:] * (snapshot['prices_at_switch'][defn['code']] / live.loc[anchor])
 
     with ThreadPoolExecutor(max_workers=len(defs)) as pool:
         series_by_code = dict(zip(

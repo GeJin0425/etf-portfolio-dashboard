@@ -63,9 +63,21 @@ def test_export_replaces_value_sleeve_after_quarter_end(tmp_path, monkeypatch):
     closes, bench = _make_fake_fetch_all(dates, {
         'SPX': bench_dates, 'NDX': bench_dates,
     })
+    old = run_portfolio(
+        {code: series.loc[:'2026-09-29'] for code, series in closes.items()},
+        [(a['code'], a['weight']) for a in fetch.ASSETS],
+        start=fetch.START_DATE, initial=fetch.INITIAL_CAPITAL,
+        comm=fetch.FEE_RATE, min_comm=fetch.FEE_MIN,
+    )
+    snapshot = {
+        'equity': [[d.strftime('%Y-%m-%d'), float(v)] for d, v in old['equity'].items()],
+        'shares': old['shares'], 'cash': old['cash'], 'fees_paid': old['fees_paid'],
+        'rebalances': old['rebalances'],
+        'start_prices': {code: float(s.loc['2026-01-05']) for code, s in closes.items()},
+    }
     closes['159263'] = closes['159263'].loc[:'2026-09-30']
     monkeypatch.setattr(export, 'fetch_all', lambda **kwargs: (closes, bench))
-    monkeypatch.setattr(export, 'validate_pre_q4_equity', lambda equity: None)
+    monkeypatch.setattr(export, 'load_pre_q4_snapshot', lambda: snapshot)
     monkeypatch.setattr(export, 'fetch_feed', lambda as_of: {
         'as_of_date': as_of, 'version': 'flow_z20_on_b2_b3__next_open_candidate_a',
         'switch_asset': '511260', 'pending_signal': None,
@@ -89,19 +101,23 @@ def test_export_replaces_value_sleeve_after_quarter_end(tmp_path, monkeypatch):
     export.validate_payload_freshness(payload, now=now)
 
 
-def test_pre_q4_portfolio_snapshot_rejects_history_changes():
-    prices = fetch.frozen_pre_q4_prices().loc[:'2026-09-29']
+def test_pre_q4_portfolio_snapshot_is_copied_without_recalculation():
+    snapshot = fetch.load_pre_q4_snapshot()
+    dates = pd.DatetimeIndex(['2026-09-30', '2026-10-08'])
+    closes = {code: pd.Series(price, index=dates) for code, price in snapshot['prices_at_switch'].items()}
+    closes['510880'] = pd.Series(3.0, index=dates)
+    closes['511260'] = pd.Series(100.0, index=dates)
     result = run_portfolio(
-        {code: prices[code].dropna() for code in prices},
+        closes,
         [(a['code'], a['weight']) for a in fetch.ASSETS],
-        start=fetch.START_DATE, initial=fetch.INITIAL_CAPITAL,
-        comm=fetch.FEE_RATE, min_comm=fetch.FEE_MIN,
+        strategy={'switch_asset': '511260', 'fills': []},
+        bond_opens=pd.Series(100.0, index=dates), snapshot=snapshot,
     )
-    export.validate_pre_q4_equity(result['equity'])
-    altered = result['equity'].copy()
-    altered.iloc[0] += 1
-    with pytest.raises(ValueError, match='历史快照'):
-        export.validate_pre_q4_equity(altered)
+    before = result['equity'].loc[:'2026-09-29']
+    assert before.index.strftime('%Y-%m-%d').tolist() == [d for d, _ in snapshot['equity']]
+    assert before.tolist() == [v for _, v in snapshot['equity']]
+    assert result['rebalances'][-1]['date'] == '2026-09-30'
+    assert result['shares']['159263'] == 0
 
 
 def test_export_survives_us_holiday_on_last_cn_trading_day(tmp_path, monkeypatch):

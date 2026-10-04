@@ -19,13 +19,14 @@ def _quarter_ends(start_year, end_year):
 
 
 def run_portfolio(closes, weights, start='2026-01-05', initial=100000,
-                  comm=0.00005, min_comm=0.5, strategy=None, bond_opens=None):
+                  comm=0.00005, min_comm=0.5, strategy=None, bond_opens=None,
+                  snapshot=None):
     """closes: {code: Series(close)}; weights: [(code, target_weight)]"""
     if abs(sum(w for _, w in weights) - 1.0) > 1e-9:
         raise ValueError('权重之和必须为1')
 
     idx = sorted(set().union(*[set(closes[code].index) for code, _ in weights]))
-    idx = [d for d in idx if d >= pd.Timestamp(start)]
+    idx = [d for d in idx if d >= pd.Timestamp('2026-09-30' if snapshot else start)]
     if not idx:
         raise ValueError('起始日之后没有任何行情数据')
     common = pd.DatetimeIndex(idx)
@@ -50,32 +51,35 @@ def run_portfolio(closes, weights, start='2026-01-05', initial=100000,
         if qe > common[-1]:
             continue  # 季度末尚未到来, 不能提前触发
         candidates = [d for d in common if d <= qe]
-        if candidates and candidates[-1] > common[0]:
+        if candidates and (candidates[-1] > common[0] or snapshot and candidates[-1] == common[0]):
             rb_dates.add(candidates[-1])
 
     def fee(v):
         return _fee(v, comm, min_comm)
 
-    cash = float(initial)
+    cash = float(snapshot['cash'] if snapshot else initial)
     shares = {code: 0 for code in closes}
-    for code, weight in weights:
-        p0 = float(aligned[code].iloc[0])
-        target = initial * weight
-        s = int((target - fee(target)) / p0 / 100) * 100
-        cost = s * p0 + fee(s * p0)
-        if cost > cash:
-            s = int((cash - fee(cash)) / p0 / 100) * 100
+    if snapshot:
+        shares.update(snapshot['shares'])
+    else:
+        for code, weight in weights:
+            p0 = float(aligned[code].iloc[0])
+            target = initial * weight
+            s = int((target - fee(target)) / p0 / 100) * 100
             cost = s * p0 + fee(s * p0)
-        cash -= cost
-        shares[code] = s
+            if cost > cash:
+                s = int((cash - fee(cash)) / p0 / 100) * 100
+                cost = s * p0 + fee(s * p0)
+            cash -= cost
+            shares[code] = s
 
     def value_at(d):
         return cash + sum(shares[code] * float(aligned[code].loc[d])
                           for code in shares if shares[code])
 
-    equity = []
-    rebalances = []
-    fees_paid = 0.0
+    equity = [(pd.Timestamp(d), float(v)) for d, v in snapshot['equity']] if snapshot else []
+    rebalances = list(snapshot['rebalances']) if snapshot else []
+    fees_paid = float(snapshot['fees_paid']) if snapshot else 0.0
     strategy_trades = []
     fills = {pd.Timestamp(f['date']): f for f in strategy['fills']} if strategy else {}
     sleeve = None

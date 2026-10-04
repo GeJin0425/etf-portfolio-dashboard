@@ -5,7 +5,6 @@ import json
 import os
 import tempfile
 from datetime import date
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -22,6 +21,7 @@ from .fetch import (
     START_DATE,
     fetch_all,
     fetch_strategy_quotes,
+    load_pre_q4_snapshot,
 )
 from .freshness import FreshnessError, utc_now, validate_quote_date, validate_series
 from .portfolio import run_portfolio
@@ -111,15 +111,6 @@ def enrich_rebalances(rebalances):
     return out
 
 
-def validate_pre_q4_equity(equity):
-    """Never republish a revised pre-Q4 portfolio curve."""
-    path = Path(__file__).resolve().parents[1] / 'data' / 'pre-q4-portfolio.csv'
-    saved = pd.read_csv(path, parse_dates=['date']).set_index('date')['value']
-    actual = equity.loc[:saved.index[-1]]
-    if not actual.index.equals(saved.index) or not np.allclose(actual, saved, rtol=0, atol=1e-6):
-        raise ValueError('Q4 前组合净值与已固定的历史快照不一致')
-
-
 def validate_payload_freshness(payload, *, now=None):
     """Independent pre-upload gate; valid JSON alone does not imply fresh data."""
     now = utc_now(now)
@@ -171,6 +162,7 @@ def export(output_path, *, now=None):
         as_of_date = closes['161130'].index[-1].strftime('%Y-%m-%d')
         strategy = fetch_feed(as_of_date)
         strategy_quotes = fetch_strategy_quotes(now=now)
+    snapshot = load_pre_q4_snapshot() if strategy else None
     # Re-check each raw input before union+ffill, including mocked/cached callers.
     source_series = {**closes, **({'510880': strategy['closes']} if strategy else {}),
                      **{code: q['close'] for code, q in strategy_quotes.items()}, **bench}
@@ -191,10 +183,9 @@ def export(output_path, *, now=None):
         min_comm=FEE_MIN,
         strategy=strategy,
         bond_opens=strategy_quotes['511260']['open'] if strategy else None,
+        snapshot=snapshot,
     )
     equity = result['equity']
-    if strategy:
-        validate_pre_q4_equity(equity)
     dates = [d.strftime('%Y-%m-%d') for d in equity.index]
 
     # ffill 无法回补序列最前面的缺口(基准历史晚于组合起始日时会出现),
@@ -234,8 +225,8 @@ def export(output_path, *, now=None):
     for a in display_assets:
         code = a['code']
         series = result['aligned'][code]
-        first_date = max(equity.index[0], pd.Timestamp(SWITCH_DATE)) if strategy and code == result['sleeve_asset'] else equity.index[0]
-        p0 = float(series.loc[first_date])
+        p0 = (float(snapshot['start_prices'][code]) if strategy and code in snapshot['start_prices']
+              else float(series.loc[pd.Timestamp(SWITCH_DATE) if strategy else equity.index[0]]))
         p1 = float(series.loc[equity.index[-1]])
         value = result['shares'][code] * p1
         holdings.append({
