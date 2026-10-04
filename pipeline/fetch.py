@@ -6,12 +6,17 @@
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from functools import partial
+from pathlib import Path
 
 import pandas as pd
 import requests
 
-from .freshness import FreshnessError, utc_now, validate_series
+from .freshness import FreshnessError, latest_completed_session, utc_now, validate_series
+from .strategy_feed import SWITCH_DATE
+
+LEGACY_LAST_CLOSE = datetime(2026, 9, 30, 7, tzinfo=timezone.utc)
 
 UA = {
     'User-Agent': (
@@ -25,6 +30,11 @@ ASSETS = [
     {'code': '161130', 'name': '纳斯达克100LOF', 'market': 'XSHE', 'em': '0.161130', 'tx': 'sz161130', 'qfq': True, 'weight': 0.28},
     {'code': '161125', 'name': '标普500LOF', 'market': 'XSHE', 'em': '0.161125', 'tx': 'sz161125', 'qfq': True, 'weight': 0.22},
     {'code': '518850', 'name': '黄金ETF华夏', 'market': 'XSHG', 'em': '1.518850', 'tx': 'sh518850', 'qfq': True, 'weight': 0.12},
+]
+
+STRATEGY_ASSETS = [
+    {'code': '510880', 'name': '红利ETF华泰柏瑞', 'market': 'XSHG', 'em': '1.510880', 'tx': 'sh510880', 'qfq': True, 'weight': 0.38},
+    {'code': '511260', 'name': '十年国债ETF', 'market': 'XSHG', 'em': '1.511260', 'tx': 'sh511260', 'qfq': True, 'weight': 0.38},
 ]
 
 BENCHMARKS = [
@@ -150,7 +160,7 @@ def fetch_sina_us(defn, start='2015-01-01'):
     return None
 
 
-def fetch_close(defn, limit=1600, *, now=None):
+def fetch_quotes(defn, limit=1600, *, now=None):
     """多源按序尝试; 足够长但陈旧的主源也必须切换, 不得直接发布。"""
     now = utc_now(now)
     sources = [('eastmoney', partial(fetch_em, limit=limit)),
@@ -168,20 +178,45 @@ def fetch_close(defn, limit=1600, *, now=None):
         except FreshnessError as exc:
             errors.append(f'{name}: {exc}')
             continue
-        return df['close']
+        return df
     raise RuntimeError(
         f'无法获取有效新鲜行情: {defn["code"]} {defn["name"]}; ' + '; '.join(errors)
     )
+
+
+def fetch_close(defn, limit=1600, *, now=None):
+    return fetch_quotes(defn, limit=limit, now=now)['close']
+
+
+def fetch_legacy_close(defn):
+    """Freeze sold 159263 shares before later dividends revise QFQ history."""
+    path = Path(__file__).resolve().parents[1] / 'data' / '159263-through-2026-09-30.csv'
+    frame = pd.read_csv(path, parse_dates=['date']).set_index('date')
+    close = frame['close']
+    validate_series(close, defn, LEGACY_LAST_CLOSE)
+    return close
+
+
+def fetch_strategy_quotes(*, now=None):
+    now = utc_now(now)
+    return {'511260': fetch_quotes(STRATEGY_ASSETS[1], now=now)}
 
 
 def fetch_all(*, now=None):
     """并发拉取全部资产与基准, 共享同一个新鲜度校验时点。"""
     now = utc_now(now)
     defs = ASSETS + BENCHMARKS
+    after_switch = latest_completed_session('XSHE', now).isoformat() > SWITCH_DATE
+
+    def read(defn):
+        if after_switch and defn['code'] == '159263':
+            return fetch_legacy_close(defn)
+        return fetch_close(defn, now=now)
+
     with ThreadPoolExecutor(max_workers=len(defs)) as pool:
         series_by_code = dict(zip(
             (d['code'] for d in defs),
-            pool.map(partial(fetch_close, now=now), defs),
+            pool.map(read, defs),
         ))
     closes = {a['code']: series_by_code[a['code']] for a in ASSETS}
     bench = {b['code']: series_by_code[b['code']] for b in BENCHMARKS}

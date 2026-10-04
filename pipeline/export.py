@@ -13,14 +13,18 @@ import pandas as pd
 from .fetch import (
     ASSETS,
     BENCHMARKS,
+    STRATEGY_ASSETS,
     FEE_MIN,
     FEE_RATE,
     INITIAL_CAPITAL,
+    LEGACY_LAST_CLOSE,
     START_DATE,
     fetch_all,
+    fetch_strategy_quotes,
 )
 from .freshness import FreshnessError, utc_now, validate_quote_date, validate_series
 from .portfolio import run_portfolio
+from .strategy_feed import SWITCH_DATE, fetch_feed
 
 
 def compute_stats(equity, initial):
@@ -85,7 +89,7 @@ def _round_list(series, ndigits=2):
 
 
 def enrich_rebalances(rebalances):
-    code_name = {a['code']: a['name'] for a in ASSETS}
+    code_name = {a['code']: a['name'] for a in ASSETS + STRATEGY_ASSETS}
     out = []
     for rb in rebalances:
         trades = []
@@ -112,15 +116,19 @@ def validate_payload_freshness(payload, *, now=None):
     try:
         meta = payload['meta']
         sources = meta['source_dates']
-        for defn in ASSETS + BENCHMARKS:
+        active = meta['as_of_date'] >= SWITCH_DATE
+        for defn in ASSETS + (STRATEGY_ASSETS if active else []) + BENCHMARKS:
             actual = date.fromisoformat(sources[defn['code']]['actual'])
-            expected = validate_quote_date(actual, defn, now)
+            check_now = LEGACY_LAST_CLOSE if active and defn['code'] == '159263' else now
+            expected = validate_quote_date(actual, defn, check_now)
             if (sources[defn['code']]['expected'] != expected
                     or sources[defn['code']]['market'] != defn['market']):
                 raise FreshnessError(f'{defn["code"]}: inconsistent freshness metadata')
-        if (meta['as_of_date'] != sources[ASSETS[0]['code']]['actual']
+        if (meta['as_of_date'] != sources[ASSETS[1]['code']]['actual']
                 or payload['series']['dates'][-1] != meta['as_of_date']):
             raise FreshnessError('Portfolio date does not match validated asset dates')
+        if active and meta['strategy_as_of_date'] != meta['as_of_date']:
+            raise FreshnessError('510880 strategy date does not match portfolio date')
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         if isinstance(exc, FreshnessError):
             raise
@@ -147,20 +155,32 @@ def _write_atomic(output_path, payload):
 def export(output_path, *, now=None):
     now = utc_now(now)
     closes, bench = fetch_all(now=now)
+    strategy = None
+    strategy_quotes = {}
+    if closes['161130'].index[-1] >= pd.Timestamp(SWITCH_DATE):
+        as_of_date = closes['161130'].index[-1].strftime('%Y-%m-%d')
+        strategy = fetch_feed(as_of_date)
+        strategy_quotes = fetch_strategy_quotes(now=now)
     # Re-check each raw input before union+ffill, including mocked/cached callers.
+    source_series = {**closes, **({'510880': strategy['closes']} if strategy else {}),
+                     **{code: q['close'] for code, q in strategy_quotes.items()}, **bench}
     source_dates = {
         defn['code']: validate_series(
-            (closes if defn in ASSETS else bench)[defn['code']], defn, now)
-        for defn in ASSETS + BENCHMARKS
+            source_series[defn['code']], defn,
+            LEGACY_LAST_CLOSE if strategy and defn['code'] == '159263' else now)
+        for defn in ASSETS + (STRATEGY_ASSETS if strategy else []) + BENCHMARKS
     }
 
     result = run_portfolio(
-        closes,
+        {**closes, **({'510880': strategy['closes']} if strategy else {}),
+         **{code: quote['close'] for code, quote in strategy_quotes.items()}},
         [(a['code'], a['weight']) for a in ASSETS],
         start=START_DATE,
         initial=INITIAL_CAPITAL,
         comm=FEE_RATE,
         min_comm=FEE_MIN,
+        strategy=strategy,
+        bond_opens=strategy_quotes['511260']['open'] if strategy else None,
     )
     equity = result['equity']
     dates = [d.strftime('%Y-%m-%d') for d in equity.index]
@@ -196,10 +216,14 @@ def export(output_path, *, now=None):
     })
 
     holdings = []
-    for a in ASSETS:
+    display_assets = [a for a in ASSETS if a['code'] != '159263'] if strategy else ASSETS
+    if strategy:
+        display_assets = [next(a for a in STRATEGY_ASSETS if a['code'] == result['sleeve_asset'])] + display_assets
+    for a in display_assets:
         code = a['code']
         series = result['aligned'][code]
-        p0 = float(series.loc[equity.index[0]])
+        first_date = max(equity.index[0], pd.Timestamp(SWITCH_DATE)) if strategy and code == result['sleeve_asset'] else equity.index[0]
+        p0 = float(series.loc[first_date])
         p1 = float(series.loc[equity.index[-1]])
         value = result['shares'][code] * p1
         holdings.append({
@@ -225,6 +249,10 @@ def export(output_path, *, now=None):
             'fee_rate': FEE_RATE,
             'min_fee': FEE_MIN,
             'next_rebalance_date': next_rebalance_date(dates[-1]),
+            'strategy_as_of_date': strategy['as_of_date'] if strategy else None,
+            'strategy_version': strategy['version'] if strategy else None,
+            'strategy_asset': result['sleeve_asset'],
+            'strategy_pending_signal': strategy['pending_signal'] if strategy else None,
         },
         'holdings': holdings,
         'series': {
@@ -237,6 +265,10 @@ def export(output_path, *, now=None):
             'value': _round_list(equity, 0),
         },
         'rebalances': enrich_rebalances(result['rebalances']),
+        'strategy_trades': [
+            {**t, 'name': next(a['name'] for a in STRATEGY_ASSETS if a['code'] == t['code'])}
+            for t in result['strategy_trades']
+        ],
     }
 
     validate_payload_freshness(payload, now=now)

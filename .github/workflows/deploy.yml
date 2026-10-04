@@ -2,7 +2,8 @@ name: Deploy dashboard
 
 on:
   schedule:
-    - cron: '40 7 * * *'
+    # 05:30 Beijing: after 510880 strategy publication and the US market close.
+    - cron: '30 21 * * 1-5'
   workflow_dispatch: {}
 
 permissions:
@@ -27,7 +28,12 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements.txt
       - name: Build with per-source exchange-session freshness validation
-        run: python -m pipeline.export
+        run: |
+          for attempt in 1 2 3; do
+            if python -m pipeline.export; then exit 0; fi
+            if [ "$attempt" -lt 3 ]; then sleep 300; fi
+          done
+          exit 1
       - name: Verify generated data before upload
         run: python -m pipeline.export --validate site/data.json
       - uses: actions/upload-pages-artifact@v3

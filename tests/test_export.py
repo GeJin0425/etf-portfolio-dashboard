@@ -56,6 +56,37 @@ def test_export_builds_payload(tmp_path, monkeypatch):
     export.validate_payload_freshness(data, now=NOW)
 
 
+def test_export_replaces_value_sleeve_after_quarter_end(tmp_path, monkeypatch):
+    dates = pd.bdate_range('2026-01-05', '2026-10-08')
+    bench_dates = pd.DatetimeIndex([pd.Timestamp('2025-12-31')]).append(dates[:-1])
+    closes, bench = _make_fake_fetch_all(dates, {
+        'SPX': bench_dates, 'NDX': bench_dates,
+    })
+    closes['159263'] = closes['159263'].loc[:'2026-09-30']
+    monkeypatch.setattr(export, 'fetch_all', lambda **kwargs: (closes, bench))
+    monkeypatch.setattr(export, 'fetch_feed', lambda as_of: {
+        'as_of_date': as_of, 'version': 'flow_z20_on_b2_b3__next_open_candidate_a',
+        'switch_asset': '511260', 'pending_signal': None,
+        'closes': pd.Series(3.0, index=dates),
+        'fills': [{'date': '2026-10-08', 'signal_date': '2026-09-30',
+                   'action': 'BUY', 'price': 3.0, 'reason': 'b1'}],
+    })
+    prices = pd.bdate_range('2026-01-05', '2026-10-08')
+    monkeypatch.setattr(export, 'fetch_strategy_quotes', lambda **kwargs: {
+        '511260': pd.DataFrame({'open': 100.0, 'close': 100.0}, index=prices),
+    })
+    now = datetime(2026, 10, 8, 8, tzinfo=timezone.utc)
+    payload = export.export(tmp_path / 'data.json', now=now)
+    assert payload['meta']['as_of_date'] == '2026-10-08'
+    assert payload['meta']['strategy_asset'] == '510880'
+    assert {h['code'] for h in payload['holdings']} == {'510880', '161130', '161125', '518850'}
+    assert [(t['code'], t['action']) for t in payload['strategy_trades']] == [
+        ('511260', '卖出'), ('510880', '买入'),
+    ]
+    assert payload['meta']['source_dates']['159263']['expected'] == '2026-09-30'
+    export.validate_payload_freshness(payload, now=now)
+
+
 def test_export_survives_us_holiday_on_last_cn_trading_day(tmp_path, monkeypatch):
     """回归: 组合最后一个A股交易日恰好是美股假日(基准序列没有这一天),
     ytd_return()/主图归一化不应该因为精确日期查找而崩溃(export.py:58 曾经的 bug)。"""
@@ -217,7 +248,7 @@ def test_upload_gate_cli_returns_nonzero_for_valid_json_without_source_dates(tmp
 
 def test_deploy_workflow_gates_artifact_upload_on_freshness_success():
     workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/deploy.yml').read_text()
-    generation = workflow.index('run: python -m pipeline.export\n')
+    generation = workflow.index('if python -m pipeline.export; then exit 0; fi')
     validation = workflow.index('run: python -m pipeline.export --validate site/data.json')
     upload = workflow.index('uses: actions/upload-pages-artifact@v3')
     deployment = workflow.index('uses: actions/deploy-pages@v4')

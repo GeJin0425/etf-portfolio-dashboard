@@ -112,7 +112,7 @@ def test_fetch_close_reports_all_stale_sources(monkeypatch):
 
 def test_fetch_all_uses_one_clock_for_all_symbols(monkeypatch):
     seen = []
-    now = datetime(2026, 10, 1, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 15, 22, tzinfo=timezone.utc)
 
     def fake_close(defn, *, now):
         seen.append(now)
@@ -123,3 +123,19 @@ def test_fetch_all_uses_one_clock_for_all_symbols(monkeypatch):
     assert len(seen) == 7 and all(stamp == now for stamp in seen)
     assert set(closes) == {a['code'] for a in fetch.ASSETS}
     assert set(bench) == {b['code'] for b in fetch.BENCHMARKS}
+
+
+def test_after_switch_legacy_price_is_limited_to_quarter_end(monkeypatch):
+    live = _history('2026-10-08')['close']
+    historical = _history('2026-09-30')['close']
+    monkeypatch.setattr(fetch, 'fetch_close', lambda defn, *, now: live)
+    monkeypatch.setattr(fetch, 'fetch_legacy_close', lambda defn: historical)
+    closes, _ = fetch.fetch_all(now=datetime(2026, 10, 8, 8, tzinfo=timezone.utc))
+    assert closes['159263'].index[-1] == pd.Timestamp('2026-09-30')
+    assert closes['161130'].index[-1] == pd.Timestamp('2026-10-08')
+
+
+def test_frozen_legacy_history_ends_at_exit_close():
+    close = fetch.fetch_legacy_close(fetch.ASSETS[0])
+    assert close.index[-1] == pd.Timestamp('2026-09-30')
+    assert close.iloc[-1] == 1.133
