@@ -36,6 +36,7 @@ async function main() {
   renderHoldingsChart(data.holdings, data.meta.current_value);
   renderHoldingsTable(data.holdings);
   renderRebalanceTable(data.rebalances);
+  renderStrategy(data);
   renderNextRebalance(data.meta.next_rebalance_date);
   renderDrawdownChart(data.series);
 }
@@ -78,6 +79,10 @@ function fmtMoney(value) {
 
 function renderTopbar(data) {
   const meta = data.meta;
+  if (meta.strategy_asset) {
+    document.getElementById('portfolio-subtitle').textContent =
+      `${meta.strategy_asset === '510880' ? '红利ETF' : '十年国债ETF'} 38 · 纳指 28 · 标普 22 · 黄金 12  |  季度末再平衡`;
+  }
   document.getElementById('updated-at').textContent =
     `数据日期 ${meta.as_of_date} · 更新于 ${meta.updated_at.slice(0, 16).replace('T', ' ')}`;
   document.getElementById('holdings-tag').textContent =
@@ -346,6 +351,23 @@ function renderRebalanceTable(rebalances) {
       </tr>
     `;
   }).join('');
+}
+
+function renderStrategy(data) {
+  if (!data.meta.strategy_asset) return;
+  document.getElementById('strategy-panel').hidden = false;
+  const asset = data.meta.strategy_asset === '510880' ? '510880 红利ETF' : '511260 十年国债ETF';
+  const pending = data.meta.strategy_pending_signal;
+  document.getElementById('strategy-status').textContent =
+    `当前持有 ${asset}；价值100于2026-09-30收盘退出。` +
+    (pending ? ` ${pending.date}收盘出现${pending.action === 'BUY' ? '买入' : '卖出'}信号，下一交易日开盘执行。` : ' 等待下一次策略信号。');
+  const rows = [...data.strategy_trades].sort((a, b) => b.date.localeCompare(a.date));
+  document.getElementById('strategy-trades-body').innerHTML = rows.map(t => `
+    <tr><td>${t.date}</td><td>${t.signal_date || '季末切换'}</td>
+    <td class="${t.action === '卖出' ? 'action-sell' : 'action-buy'}">${t.action}</td>
+    <td>${t.code}</td><td>${t.shares.toLocaleString('zh-CN')}</td>
+    <td>¥${t.price.toFixed(3)}</td><td>¥${t.fee.toFixed(2)}</td></tr>
+  `).join('') || '<tr><td colspan="7">季末切换后的策略交易尚未发生</td></tr>';
 }
 
 function renderNextRebalance(date) {

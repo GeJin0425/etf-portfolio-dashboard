@@ -6,12 +6,17 @@
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from functools import partial
+from pathlib import Path
 
 import pandas as pd
 import requests
 
-from .freshness import FreshnessError, utc_now, validate_series
+from .freshness import FreshnessError, latest_completed_session, utc_now, validate_series
+from .strategy_feed import SWITCH_DATE
+
+LEGACY_LAST_CLOSE = datetime(2026, 9, 30, 7, tzinfo=timezone.utc)
 
 UA = {
     'User-Agent': (
@@ -25,6 +30,11 @@ ASSETS = [
     {'code': '161130', 'name': '纳斯达克100LOF', 'market': 'XSHE', 'em': '0.161130', 'tx': 'sz161130', 'qfq': True, 'weight': 0.28},
     {'code': '161125', 'name': '标普500LOF', 'market': 'XSHE', 'em': '0.161125', 'tx': 'sz161125', 'qfq': True, 'weight': 0.22},
     {'code': '518850', 'name': '黄金ETF华夏', 'market': 'XSHG', 'em': '1.518850', 'tx': 'sh518850', 'qfq': True, 'weight': 0.12},
+]
+
+STRATEGY_ASSETS = [
+    {'code': '510880', 'name': '红利ETF华泰柏瑞', 'market': 'XSHG', 'em': '1.510880', 'tx': 'sh510880', 'qfq': True, 'weight': 0.38},
+    {'code': '511260', 'name': '十年国债ETF', 'market': 'XSHG', 'em': '1.511260', 'tx': 'sh511260', 'qfq': True, 'weight': 0.38},
 ]
 
 BENCHMARKS = [
@@ -150,7 +160,7 @@ def fetch_sina_us(defn, start='2015-01-01'):
     return None
 
 
-def fetch_close(defn, limit=1600, *, now=None):
+def fetch_quotes(defn, limit=1600, *, now=None):
     """多源按序尝试; 足够长但陈旧的主源也必须切换, 不得直接发布。"""
     now = utc_now(now)
     sources = [('eastmoney', partial(fetch_em, limit=limit)),
@@ -168,20 +178,53 @@ def fetch_close(defn, limit=1600, *, now=None):
         except FreshnessError as exc:
             errors.append(f'{name}: {exc}')
             continue
-        return df['close']
+        return df
     raise RuntimeError(
         f'无法获取有效新鲜行情: {defn["code"]} {defn["name"]}; ' + '; '.join(errors)
     )
+
+
+def fetch_close(defn, limit=1600, *, now=None):
+    return fetch_quotes(defn, limit=limit, now=now)['close']
+
+
+def load_pre_q4_snapshot():
+    path = Path(__file__).resolve().parents[1] / 'data' / 'pre-q4-snapshot.json'
+    with path.open(encoding='utf-8') as f:
+        snapshot = json.load(f)
+    if snapshot['switch_date'] != SWITCH_DATE or snapshot['through'] != '2026-09-29':
+        raise ValueError('Q4 切换快照日期不匹配')
+    return snapshot
+
+
+def fetch_strategy_quotes(*, now=None):
+    now = utc_now(now)
+    return {'511260': fetch_quotes(STRATEGY_ASSETS[1], now=now)}
 
 
 def fetch_all(*, now=None):
     """并发拉取全部资产与基准, 共享同一个新鲜度校验时点。"""
     now = utc_now(now)
     defs = ASSETS + BENCHMARKS
+    after_switch = latest_completed_session('XSHE', now).isoformat() >= SWITCH_DATE
+    snapshot = load_pre_q4_snapshot() if after_switch else None
+    anchor = pd.Timestamp(SWITCH_DATE)
+
+    def read(defn):
+        if not after_switch or defn not in ASSETS:
+            return fetch_close(defn, now=now)
+        if defn['code'] == '159263':
+            return pd.Series([snapshot['prices_at_switch'][defn['code']]], index=[anchor])
+        live = fetch_close(defn, now=now)
+        # ponytail: the quote window must reach this anchor; increase lookback if it ages out.
+        if anchor not in live.index:
+            raise FreshnessError(f'{defn["code"]}: missing Q3 close for price continuity')
+        return live.loc[anchor:] * (snapshot['prices_at_switch'][defn['code']] / live.loc[anchor])
+
     with ThreadPoolExecutor(max_workers=len(defs)) as pool:
         series_by_code = dict(zip(
             (d['code'] for d in defs),
-            pool.map(partial(fetch_close, now=now), defs),
+            pool.map(read, defs),
         ))
     closes = {a['code']: series_by_code[a['code']] for a in ASSETS}
     bench = {b['code']: series_by_code[b['code']] for b in BENCHMARKS}

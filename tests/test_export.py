@@ -7,8 +7,9 @@ from datetime import datetime, timezone
 import pandas as pd
 import pytest
 
-from pipeline import export
+from pipeline import export, fetch
 from pipeline.freshness import FreshnessError
+from pipeline.portfolio import run_portfolio
 
 BASES = {'159263': 1.0, '161130': 4.0, '161125': 3.0, '518850': 8.0}
 BENCH_BASES = {'000300': 4500.0, 'SPX': 6800.0, 'NDX': 20000.0}
@@ -54,6 +55,69 @@ def test_export_builds_payload(tmp_path, monkeypatch):
     assert set(data['meta']['source_dates']) == set(BASES) | set(BENCH_BASES)
     assert data['meta']['source_dates']['161130']['market'] == 'XSHE'
     export.validate_payload_freshness(data, now=NOW)
+
+
+def test_export_replaces_value_sleeve_after_quarter_end(tmp_path, monkeypatch):
+    dates = pd.bdate_range('2026-01-05', '2026-10-08')
+    bench_dates = pd.DatetimeIndex([pd.Timestamp('2025-12-31')]).append(dates[:-1])
+    closes, bench = _make_fake_fetch_all(dates, {
+        'SPX': bench_dates, 'NDX': bench_dates,
+    })
+    old = run_portfolio(
+        {code: series.loc[:'2026-09-29'] for code, series in closes.items()},
+        [(a['code'], a['weight']) for a in fetch.ASSETS],
+        start=fetch.START_DATE, initial=fetch.INITIAL_CAPITAL,
+        comm=fetch.FEE_RATE, min_comm=fetch.FEE_MIN,
+    )
+    snapshot = {
+        'equity': [[d.strftime('%Y-%m-%d'), float(v)] for d, v in old['equity'].items()],
+        'shares': old['shares'], 'cash': old['cash'], 'fees_paid': old['fees_paid'],
+        'rebalances': old['rebalances'],
+        'start_prices': {code: float(s.loc['2026-01-05']) for code, s in closes.items()},
+    }
+    closes['159263'] = closes['159263'].loc[:'2026-09-30']
+    monkeypatch.setattr(export, 'fetch_all', lambda **kwargs: (closes, bench))
+    monkeypatch.setattr(export, 'load_pre_q4_snapshot', lambda: snapshot)
+    monkeypatch.setattr(export, 'fetch_feed', lambda as_of: {
+        'as_of_date': as_of, 'version': 'flow_z20_on_b2_b3__next_open_candidate_a',
+        'switch_asset': '511260', 'pending_signal': None,
+        'closes': pd.Series(3.0, index=dates),
+        'fills': [{'date': '2026-10-08', 'signal_date': '2026-09-30',
+                   'action': 'BUY', 'price': 3.0, 'reason': 'b1'}],
+    })
+    prices = pd.bdate_range('2026-01-05', '2026-10-08')
+    monkeypatch.setattr(export, 'fetch_strategy_quotes', lambda **kwargs: {
+        '511260': pd.DataFrame({'open': 100.0, 'close': 100.0}, index=prices),
+    })
+    now = datetime(2026, 10, 8, 8, tzinfo=timezone.utc)
+    payload = export.export(tmp_path / 'data.json', now=now)
+    assert payload['meta']['as_of_date'] == '2026-10-08'
+    assert payload['meta']['strategy_asset'] == '510880'
+    assert {h['code'] for h in payload['holdings']} == {'510880', '161130', '161125', '518850'}
+    assert [(t['code'], t['action']) for t in payload['strategy_trades']] == [
+        ('511260', '卖出'), ('510880', '买入'),
+    ]
+    assert payload['meta']['source_dates']['159263']['expected'] == '2026-09-30'
+    export.validate_payload_freshness(payload, now=now)
+
+
+def test_pre_q4_portfolio_snapshot_is_copied_without_recalculation():
+    snapshot = fetch.load_pre_q4_snapshot()
+    dates = pd.DatetimeIndex(['2026-09-30', '2026-10-08'])
+    closes = {code: pd.Series(price, index=dates) for code, price in snapshot['prices_at_switch'].items()}
+    closes['510880'] = pd.Series(3.0, index=dates)
+    closes['511260'] = pd.Series(100.0, index=dates)
+    result = run_portfolio(
+        closes,
+        [(a['code'], a['weight']) for a in fetch.ASSETS],
+        strategy={'switch_asset': '511260', 'fills': []},
+        bond_opens=pd.Series(100.0, index=dates), snapshot=snapshot,
+    )
+    before = result['equity'].loc[:'2026-09-29']
+    assert before.index.strftime('%Y-%m-%d').tolist() == [d for d, _ in snapshot['equity']]
+    assert before.tolist() == [v for _, v in snapshot['equity']]
+    assert result['rebalances'][-1]['date'] == '2026-09-30'
+    assert result['shares']['159263'] == 0
 
 
 def test_export_survives_us_holiday_on_last_cn_trading_day(tmp_path, monkeypatch):
@@ -217,7 +281,7 @@ def test_upload_gate_cli_returns_nonzero_for_valid_json_without_source_dates(tmp
 
 def test_deploy_workflow_gates_artifact_upload_on_freshness_success():
     workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/deploy.yml').read_text()
-    generation = workflow.index('run: python -m pipeline.export\n')
+    generation = workflow.index('if python -m pipeline.export; then exit 0; fi')
     validation = workflow.index('run: python -m pipeline.export --validate site/data.json')
     upload = workflow.index('uses: actions/upload-pages-artifact@v3')
     deployment = workflow.index('uses: actions/deploy-pages@v4')
