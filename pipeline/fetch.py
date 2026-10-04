@@ -216,6 +216,7 @@ def fetch_all(*, now=None):
         if defn['code'] == '159263':
             return pd.Series([snapshot['prices_at_switch'][defn['code']]], index=[anchor])
         live = fetch_close(defn, now=now)
+        # ponytail: the quote window must reach this anchor; increase lookback if it ages out.
         if anchor not in live.index:
             raise FreshnessError(f'{defn["code"]}: missing Q3 close for price continuity')
         return live.loc[anchor:] * (snapshot['prices_at_switch'][defn['code']] / live.loc[anchor])
