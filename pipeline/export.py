@@ -119,6 +119,19 @@ def validate_post_switch_history(source_series, bond_opens, as_of_date):
     missing_opens = needed.difference(bond_opens.index)
     if len(missing_opens):
         raise FreshnessError(f'511260: missing strategy open on {missing_opens[0]:%Y-%m-%d}')
+    opens = pd.to_numeric(bond_opens.loc[needed], errors='coerce').to_numpy(dtype=float)
+    invalid = ~np.isfinite(opens) | (opens <= 0)
+    if invalid.any():
+        raise FreshnessError(f'511260: invalid strategy open on {needed[invalid][0]:%Y-%m-%d}')
+
+
+def stale_after(as_of_date):
+    try:
+        next_day = next_session('XSHE', date.fromisoformat(as_of_date))
+    except FreshnessError as exc:
+        raise FreshnessError(f'calendar_unavailable: {exc}') from exc
+    return datetime.combine(next_day + timedelta(days=1), time(9),
+                            ZoneInfo('Asia/Shanghai')).isoformat()
 
 
 def _round_list(series, ndigits=2):
@@ -198,9 +211,7 @@ def validate_payload_freshness(payload, *, now=None):
             raise FreshnessError('Portfolio date does not match validated asset dates')
         if active and meta['strategy_as_of_date'] != meta['as_of_date']:
             raise FreshnessError('510880 strategy date does not match portfolio date')
-        deadline = datetime.combine(next_session('XSHE', date.fromisoformat(meta['as_of_date']))
-                                    + timedelta(days=1), time(9), ZoneInfo('Asia/Shanghai'))
-        if meta['stale_after'] != deadline.isoformat():
+        if meta['stale_after'] != stale_after(meta['as_of_date']):
             raise FreshnessError('Inconsistent market-session freshness deadline')
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         if isinstance(exc, FreshnessError):
@@ -244,6 +255,10 @@ def export(output_path, *, now=None):
             LEGACY_LAST_CLOSE if strategy and defn['code'] == '159263' else now)
         for defn in ASSETS + (STRATEGY_ASSETS if strategy else [])
     }
+    for code, series in closes.items():
+        if series.attrs.get('price_method'):
+            source_dates[code]['price_method'] = series.attrs['price_method']
+            source_dates[code]['price_provenance'] = series.attrs['price_provenance']
     if strategy:
         validate_post_switch_history(
             source_series, strategy_quotes['511260']['open'], as_of_date)
@@ -339,16 +354,14 @@ def export(output_path, *, now=None):
         })
 
     beijing_now = now.astimezone(ZoneInfo('Asia/Shanghai'))
-    stale_after = datetime.combine(
-        next_session('XSHE', equity.index[-1].date()) + timedelta(days=1),
-        time(9), ZoneInfo('Asia/Shanghai'))
+    stale_deadline = stale_after(dates[-1])
     payload = {
         'meta': {
             **stats,
             'start_date': START_DATE,
             'as_of_date': dates[-1],
             'updated_at': beijing_now.isoformat(),
-            'stale_after': stale_after.isoformat(),
+            'stale_after': stale_deadline,
             'build_commit': os.environ.get('GITHUB_SHA'),
             'source_dates': source_dates,
             'initial_capital': INITIAL_CAPITAL,
