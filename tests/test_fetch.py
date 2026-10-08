@@ -110,6 +110,82 @@ def test_fetch_close_reports_all_stale_sources(monkeypatch):
         fetch.fetch_close(fetch.ASSETS[0], now=datetime(2026, 7, 15, 22, tzinfo=timezone.utc))
 
 
+def test_post_switch_adjusted_quotes_need_only_anchor_and_new_sessions(monkeypatch):
+    dates = pd.DatetimeIndex(['2026-09-30', '2026-10-08'])
+    adjusted = pd.DataFrame({'close': [4.796, 4.814]}, index=dates)
+    calls = []
+    monkeypatch.setattr(fetch, 'fetch_em', lambda *args, **kwargs: adjusted)
+    monkeypatch.setattr(fetch, 'fetch_tx', lambda *args, **kwargs:
+                        calls.append('tencent') or None)
+    now = datetime(2026, 10, 8, 8, tzinfo=timezone.utc)
+    result = fetch.fetch_quotes({**fetch.ASSETS[1], 'min_rows': 2}, now=now)
+    assert result['close'].tolist() == [4.796, 4.814]
+    assert calls == []
+    with pytest.raises(RuntimeError, match='insufficient history'):
+        fetch.fetch_quotes(fetch.ASSETS[1], now=now)
+
+
+def test_verified_raw_ratio_uses_same_response_anchor_and_official_check(monkeypatch):
+    dates = pd.DatetimeIndex(['2026-09-30', '2026-10-08'])
+    raw = pd.DataFrame({'close': [4.796, 4.814]}, index=dates)
+    calls = []
+    def raw_source(defn):
+        calls.append(('raw', defn['qfq']))
+        return raw
+    def checked(code, through_date, *, now):
+        calls.append(('official', code, through_date))
+        return {'notices_through': '2026-10-09', 'sources': ['official']}
+    monkeypatch.setattr(fetch, 'fetch_tx', raw_source)
+    monkeypatch.setattr(fetch, 'verify_no_actions', checked)
+    result = fetch.verified_raw_ratio(fetch.ASSETS[1], 4.796, dates[0],
+                                      dates[-1].date(), now=datetime(2026, 10, 8, 22, tzinfo=timezone.utc))
+    assert result.tolist() == pytest.approx([4.796, 4.814])
+    assert calls == [('raw', False), ('official', '161130', dates[-1].date())]
+    assert result.attrs['price_method'] == 'verified_no_action_raw_ratio'
+    assert result.attrs['price_provenance']['raw_anchor_close'] == 4.796
+
+
+@pytest.mark.parametrize('raw,reason', [
+    (pd.DataFrame({'close': [4.814]}, index=pd.DatetimeIndex(['2026-10-08'])), 'anchor'),
+    (pd.DataFrame({'close': [4.795, 4.814]}, index=pd.DatetimeIndex(['2026-09-30', '2026-10-08'])), 'anchors differ'),
+    (pd.DataFrame({'close': [4.796, 4.814]}, index=pd.DatetimeIndex(['2026-09-30', '2026-10-09'])), 'latest date'),
+    (pd.DataFrame({'close': [4.796, 0]}, index=pd.DatetimeIndex(['2026-09-30', '2026-10-08'])), 'invalid close'),
+])
+def test_verified_raw_ratio_rejects_bad_quote_before_disclosures(monkeypatch, raw, reason):
+    monkeypatch.setattr(fetch, 'fetch_tx', lambda defn: raw)
+    monkeypatch.setattr(fetch, 'verify_no_actions', lambda *args, **kwargs:
+                        pytest.fail('must not check disclosures for invalid raw quotes'))
+    with pytest.raises(fetch.FreshnessError, match=reason):
+        fetch.verified_raw_ratio(fetch.ASSETS[1], 4.796, pd.Timestamp('2026-09-30'),
+                                 datetime(2026, 10, 8).date(),
+                                 now=datetime(2026, 10, 8, 22, tzinfo=timezone.utc))
+
+
+def test_verified_raw_ratio_requires_every_open_session(monkeypatch):
+    raw = pd.DataFrame({'close': [4.796, 4.82]},
+                       index=pd.DatetimeIndex(['2026-09-30', '2026-10-09']))
+    monkeypatch.setattr(fetch, 'fetch_tx', lambda defn: raw)
+    monkeypatch.setattr(fetch, 'verify_no_actions', lambda *a, **k:
+                        pytest.fail('incomplete raw history must not be certified'))
+    with pytest.raises(fetch.FreshnessError, match='missing 2026-10-08'):
+        fetch.verified_raw_ratio(fetch.ASSETS[1], 4.796, pd.Timestamp('2026-09-30'),
+                                 datetime(2026, 10, 9).date(),
+                                 now=datetime(2026, 10, 9, 22, tzinfo=timezone.utc))
+
+
+def test_verified_raw_ratio_fails_closed_on_official_uncertainty(monkeypatch):
+    raw = pd.DataFrame({'close': [4.796, 4.814]},
+                       index=pd.DatetimeIndex(['2026-09-30', '2026-10-08']))
+    monkeypatch.setattr(fetch, 'fetch_tx', lambda defn: raw)
+    def uncertain(*args, **kwargs):
+        raise fetch.FreshnessError('new corporate action notice')
+    monkeypatch.setattr(fetch, 'verify_no_actions', uncertain)
+    with pytest.raises(fetch.FreshnessError, match='new corporate action notice'):
+        fetch.verified_raw_ratio(fetch.ASSETS[1], 4.796, pd.Timestamp('2026-09-30'),
+                                 datetime(2026, 10, 8).date(),
+                                 now=datetime(2026, 10, 8, 22, tzinfo=timezone.utc))
+
+
 def test_benchmark_fetch_trims_later_us_close_to_china_cutoff(monkeypatch):
     raw = _history('2026-10-08')
     monkeypatch.setattr(fetch, 'fetch_em', lambda *args, **kwargs: raw)
