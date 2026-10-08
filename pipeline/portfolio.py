@@ -58,6 +58,10 @@ def run_portfolio(closes, weights, start='2026-01-05', initial=100000,
         return _fee(v, comm, min_comm)
 
     cash = float(snapshot['cash'] if snapshot else initial)
+    # Opening commissions are already reflected in cash / first-day NAV.
+    # The frozen snapshot's fees_paid only contains later rebalance fees.
+    fees_paid = (float(snapshot['fees_paid']) + float(snapshot['opening_fees'])
+                 if snapshot else 0.0)
     shares = {code: 0 for code in closes}
     if snapshot:
         shares.update(snapshot['shares'])
@@ -70,7 +74,9 @@ def run_portfolio(closes, weights, start='2026-01-05', initial=100000,
             if cost > cash:
                 s = int((cash - fee(cash)) / p0 / 100) * 100
                 cost = s * p0 + fee(s * p0)
-            cash -= cost
+            if s:
+                cash -= cost
+                fees_paid += fee(s * p0)
             shares[code] = s
 
     def value_at(d):
@@ -79,7 +85,6 @@ def run_portfolio(closes, weights, start='2026-01-05', initial=100000,
 
     equity = [(pd.Timestamp(d), float(v)) for d, v in snapshot['equity']] if snapshot else []
     rebalances = list(snapshot['rebalances']) if snapshot else []
-    fees_paid = float(snapshot['fees_paid']) if snapshot else 0.0
     strategy_trades = []
     fills = {pd.Timestamp(f['date']): f for f in strategy['fills']} if strategy else {}
     sleeve = None
