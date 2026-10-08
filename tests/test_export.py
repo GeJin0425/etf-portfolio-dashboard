@@ -119,6 +119,22 @@ def test_post_switch_missing_intermediate_held_close_is_rejected():
         '2026-09-30', '2026-10-08', '2026-10-09']
 
 
+@pytest.mark.parametrize('invalid_open', [0, -1, float('nan'), float('inf')])
+def test_post_switch_invalid_strategy_open_is_rejected(invalid_open):
+    dates = pd.DatetimeIndex(['2026-09-30', '2026-10-08'])
+    sources = {code: pd.Series([1, 2], index=dates)
+               for code in ('161130', '161125', '518850', '510880', '511260')}
+    opens = pd.Series([1, invalid_open], index=dates)
+    with pytest.raises(FreshnessError, match='511260: invalid strategy open on 2026-10-08'):
+        export.validate_post_switch_history(sources, opens, '2026-10-08')
+
+
+def test_unconfigured_next_calendar_year_fails_explicitly():
+    assert export.stale_after('2026-12-30') == '2027-01-01T09:00:00+08:00'
+    with pytest.raises(FreshnessError, match='calendar_unavailable: XSHE: calendar year 2027'):
+        export.stale_after('2026-12-31')
+
+
 def test_export_replaces_value_sleeve_after_quarter_end(tmp_path, monkeypatch):
     dates = pd.bdate_range('2026-01-05', '2026-10-08')
     bench_dates = pd.DatetimeIndex([pd.Timestamp('2025-12-31')]).append(dates[:-1])
@@ -140,6 +156,11 @@ def test_export_replaces_value_sleeve_after_quarter_end(tmp_path, monkeypatch):
         'start_prices': {code: float(s.loc['2026-01-05']) for code, s in closes.items()},
     }
     closes['159263'] = closes['159263'].loc[:'2026-09-30']
+    closes['161130'].attrs['price_method'] = 'verified_no_action_raw_ratio'
+    closes['161130'].attrs['price_provenance'] = {
+        'raw_provider': 'tencent', 'raw_anchor_date': '2026-09-30',
+        'disclosure_check': {'market_through': '2026-10-08'},
+    }
     monkeypatch.setattr(export, 'fetch_all', lambda **kwargs: (closes, bench))
     monkeypatch.setattr(export, 'load_pre_q4_snapshot', lambda: snapshot)
     monkeypatch.setattr(export, 'fetch_feed', lambda as_of: {
@@ -165,6 +186,8 @@ def test_export_replaces_value_sleeve_after_quarter_end(tmp_path, monkeypatch):
     ]
     assert payload['meta']['source_dates']['159263']['expected'] == '2026-09-30'
     assert payload['meta']['source_dates']['SPX']['actual'] == '2026-10-07'
+    assert payload['meta']['source_dates']['161130']['price_method'] == 'verified_no_action_raw_ratio'
+    assert payload['meta']['source_dates']['161130']['price_provenance']['raw_provider'] == 'tencent'
     assert next(h for h in payload['holdings'] if h['code'] == '510880')['return_base_date'] == '2026-09-30'
     export.validate_payload_freshness(payload, now=now)
 
