@@ -55,6 +55,9 @@ body {
   box-shadow: 0 0 10px var(--green);
   flex: none;
 }
+.status-dot.partial { background: var(--gold); box-shadow: 0 0 10px var(--gold); }
+.status-dot.stale { background: var(--red); box-shadow: 0 0 10px var(--red); }
+.return-base { display: block; color: var(--text-dim); font-size: 10px; }
 
 .kpi-row {
   display: grid;
