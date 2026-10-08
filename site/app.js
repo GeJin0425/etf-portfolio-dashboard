@@ -25,6 +25,12 @@ async function main() {
     data = await res.json();
   } catch (err) {
     showDataError(`数据加载失败: ${err.message}`);
+    const dot = document.getElementById('status-dot');
+    dot.classList.remove('partial');
+    dot.classList.add('stale');
+    dot.title = '数据加载失败';
+    document.getElementById('updated-at').textContent = '数据加载失败';
+    document.getElementById('portfolio-subtitle').textContent = '持仓配置无法确认';
     return;
   }
 
@@ -53,6 +59,7 @@ function checkStaleness(meta) {
     .filter(([, source]) => source.status === 'unavailable' || source.status === 'partial')
     .map(([code]) => code);
   const dot = document.getElementById('status-dot');
+  dot.classList.remove('partial');
   if (Date.now() > deadline.getTime()) {
     dot.classList.add('stale');
     dot.title = `组合数据滞后，最近数据日期 ${meta.as_of_date}`;
@@ -104,17 +111,24 @@ function renderKpis(meta) {
     { value: fmtSigned(meta.annualized_pct), label: '年化收益' },
     { value: fmtSigned(meta.max_drawdown_pct), label: '最大回撤' },
     { value: meta.sharpe.toFixed(2), label: '夏普比率', plain: true },
-    { value: fmtSigned(meta.excess_csi300_pct), label: '收益差 vs 沪深300', sub: `沪深300 ${fmtSigned(meta.csi300_return_pct)}(建仓)${csiYtd}` },
-    { value: fmtSigned(meta.excess_sp500_pct), label: '收益差 vs 标普500', sub: `标普500 ${fmtSigned(meta.sp500_return_pct)}(建仓)${spxYtd}` },
-    { value: fmtSigned(meta.excess_ndx100_pct), label: '收益差 vs 纳斯达克100', sub: `纳斯达克100 ${fmtSigned(meta.ndx100_return_pct)}(建仓)${ndxYtd}` },
+    { value: fmtSigned(meta.excess_csi300_pct), label: '收益差 vs 沪深300', sub: `沪深300 ${fmtSigned(meta.csi300_return_pct)}(建仓)${csiYtd} · 基准 ${benchmarkSource(meta, '000300')}` },
+    { value: fmtSigned(meta.excess_sp500_pct), label: '收益差 vs 标普500', sub: `标普500 ${fmtSigned(meta.sp500_return_pct)}(建仓)${spxYtd} · 基准 ${benchmarkSource(meta, 'SPX')}` },
+    { value: fmtSigned(meta.excess_ndx100_pct), label: '收益差 vs 纳斯达克100', sub: `纳斯达克100 ${fmtSigned(meta.ndx100_return_pct)}(建仓)${ndxYtd} · 基准 ${benchmarkSource(meta, 'NDX')}` },
   ];
   document.getElementById('kpi-row').innerHTML = cards.map(c => `
     <div class="kpi-card">
       <div class="label">${c.label}</div>
-      <div class="value ${c.plain ? 'plain' : (parseFloat(c.value) >= 0 ? 'pos' : 'neg')}">${c.value}</div>
+      <div class="value ${c.plain || c.value === '--' ? 'plain' : (parseFloat(c.value) >= 0 ? 'pos' : 'neg')}">${c.value}</div>
       ${c.sub ? `<div class="sub">${c.sub}</div>` : ''}
     </div>
   `).join('');
+}
+
+function benchmarkSource(meta, code) {
+  const item = meta.source_dates[code];
+  if (item.status === 'unavailable') return `缺失（需要 ${item.expected}）`;
+  if (item.status === 'partial') return `${item.actual}（历史缺 ${item.missing_count} 个对齐点${item.ytd_base_missing ? '，YTD基点缺失' : ''}）`;
+  return item.actual;
 }
 
 function renderBenchmarkNote(meta) {
@@ -122,15 +136,9 @@ function renderBenchmarkNote(meta) {
   const csi = meta.csi300_ytd_pct == null ? '--' : fmtSigned(meta.csi300_ytd_pct);
   const spx = meta.sp500_ytd_pct == null ? '--' : fmtSigned(meta.sp500_ytd_pct);
   const ndx = meta.ndx100_ytd_pct == null ? '--' : fmtSigned(meta.ndx100_ytd_pct);
-  const source = (code) => {
-    const item = meta.source_dates[code];
-    if (item.status === 'unavailable') return `缺失（需要 ${item.expected}）`;
-    if (item.status === 'partial') return `${item.actual}（历史缺 ${item.missing_count} 个对齐点${item.ytd_base_missing ? '，YTD基点缺失' : ''}）`;
-    return item.actual;
-  };
   note.textContent =
     `主图以建仓时各市场最近已收盘交易日为起点；每日按北京时间15:00可得数据对齐。` +
-    `最新基准日期：沪深300 ${source('000300')} · 标普500 ${source('SPX')} · 纳斯达克100 ${source('NDX')}。` +
+    `最新基准日期：沪深300 ${benchmarkSource(meta, '000300')} · 标普500 ${benchmarkSource(meta, 'SPX')} · 纳斯达克100 ${benchmarkSource(meta, 'NDX')}。` +
     `价格指数YTD（自${meta.ytd_base_date}）：沪深300 ${csi} · 标普500 ${spx} · 纳斯达克100 ${ndx}。` +
     `美指为美元价格指数，仅供参考；与人民币ETF组合的收益差未调整汇率、股息和跟踪误差。`;
 }
