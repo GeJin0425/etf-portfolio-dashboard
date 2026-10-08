@@ -110,17 +110,44 @@ def test_fetch_close_reports_all_stale_sources(monkeypatch):
         fetch.fetch_close(fetch.ASSETS[0], now=datetime(2026, 7, 15, 22, tzinfo=timezone.utc))
 
 
+def test_benchmark_fetch_trims_later_us_close_to_china_cutoff(monkeypatch):
+    raw = _history('2026-10-08')
+    monkeypatch.setattr(fetch, 'fetch_em', lambda *args, **kwargs: raw)
+    cutoff = datetime(2026, 10, 8, 7, tzinfo=timezone.utc)
+    result = fetch.fetch_quotes(fetch.BENCHMARKS[1],
+                                now=datetime(2026, 10, 8, 22, tzinfo=timezone.utc),
+                                as_of=cutoff)
+    assert result.index[-1] == pd.Timestamp('2026-10-07')
+
+
+def test_unavailable_benchmark_does_not_block_held_quotes(monkeypatch):
+    monkeypatch.setattr(fetch, 'fetch_close', lambda *args, **kwargs:
+                        _history('2026-07-15')['close'])
+    monkeypatch.setattr(fetch, 'fetch_quotes', lambda *args, **kwargs:
+                        (_ for _ in ()).throw(RuntimeError('no benchmark source')))
+    closes, bench = fetch.fetch_all(now=datetime(2026, 7, 15, 22, tzinfo=timezone.utc))
+    assert closes['161130'].index[-1] == pd.Timestamp('2026-07-15')
+    assert all(value is None for value in bench.values())
+
+
 def test_fetch_all_uses_one_clock_for_all_symbols(monkeypatch):
     seen = []
+    cutoffs = []
     now = datetime(2026, 7, 15, 22, tzinfo=timezone.utc)
 
     def fake_close(defn, *, now):
         seen.append(now)
         return _history('2026-09-30')['close']
 
+    def fake_quotes(defn, *, now, as_of):
+        cutoffs.append(as_of)
+        return {'close': _history('2026-09-30')['close']}
+
     monkeypatch.setattr(fetch, 'fetch_close', fake_close)
+    monkeypatch.setattr(fetch, 'fetch_quotes', fake_quotes)
     closes, bench = fetch.fetch_all(now=now)
-    assert len(seen) == 7 and all(stamp == now for stamp in seen)
+    assert len(seen) == 4 and all(stamp == now for stamp in seen)
+    assert len(cutoffs) == 3 and all(stamp.isoformat().startswith('2026-07-15T15:00:00+08:00') for stamp in cutoffs)
     assert set(closes) == {a['code'] for a in fetch.ASSETS}
     assert set(bench) == {b['code'] for b in fetch.BENCHMARKS}
 
@@ -135,6 +162,7 @@ def test_after_switch_legacy_price_is_limited_to_quarter_end(monkeypatch):
         return live
 
     monkeypatch.setattr(fetch, 'fetch_close', fake_close)
+    monkeypatch.setattr(fetch, 'fetch_quotes', lambda defn, *, now, as_of: {'close': live})
     closes, _ = fetch.fetch_all(now=datetime(2026, 10, 8, 8, tzinfo=timezone.utc))
     assert closes['159263'].index[-1] == pd.Timestamp('2026-09-30')
     assert closes['161130'].index[-1] == pd.Timestamp('2026-10-08')
@@ -150,3 +178,37 @@ def test_frozen_legacy_history_ends_at_exit_close():
     assert snapshot['switch_date'] == '2026-09-30'
     assert set(snapshot['prices_at_switch']) == {a['code'] for a in fetch.ASSETS}
     assert snapshot['prices_at_switch']['159263'] == 1.133
+
+
+def test_bond_adjusted_open_and_close_keep_fixed_switch_anchor(monkeypatch):
+    dates = pd.DatetimeIndex(['2026-09-30', '2026-10-08'])
+
+    def source(scale):
+        return pd.DataFrame({'open': [134.8, 135.0], 'close': [134.804, 135.1],
+                             'volume': [100, 200]}, index=dates) * scale
+
+    monkeypatch.setattr(fetch, 'fetch_quotes', lambda *args, **kwargs: source(1))
+    first = fetch.fetch_strategy_quotes(now=datetime(2026, 10, 8, 8, tzinfo=timezone.utc))['511260']
+    monkeypatch.setattr(fetch, 'fetch_quotes', lambda *args, **kwargs: source(0.5))
+    second = fetch.fetch_strategy_quotes(now=datetime(2026, 10, 8, 8, tzinfo=timezone.utc))['511260']
+    assert first.loc['2026-09-30', 'close'] == pytest.approx(134.804)
+    assert first[['open', 'close']].equals(second[['open', 'close']])
+    assert second.loc['2026-10-08', 'volume'] == 100  # volume is not a price
+
+
+def test_bond_quote_without_switch_anchor_fails(monkeypatch):
+    monkeypatch.setattr(fetch, 'fetch_quotes', lambda *args, **kwargs:
+                        pd.DataFrame({'open': [135.0], 'close': [135.1]},
+                                     index=pd.DatetimeIndex(['2026-10-08'])))
+    with pytest.raises(fetch.FreshnessError, match='missing Q3 close'):
+        fetch.fetch_strategy_quotes(now=datetime(2026, 10, 8, 8, tzinfo=timezone.utc))
+
+
+def test_adjusted_etf_never_falls_back_to_unadjusted_tencent_rows(monkeypatch):
+    class FakeResp:
+        def json(self):
+            return {'data': {'sh511260': {'day': [['2026-09-30', '1', '1', '1', '1', '10']]}}}
+
+    monkeypatch.setattr(fetch.requests, 'get', lambda *args, **kwargs: FakeResp())
+    monkeypatch.setattr(fetch.time, 'sleep', lambda *args: None)
+    assert fetch.fetch_tx({'tx': 'sh511260', 'qfq': True}) is None
