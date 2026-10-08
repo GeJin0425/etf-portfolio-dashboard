@@ -110,17 +110,120 @@ def test_fetch_close_reports_all_stale_sources(monkeypatch):
         fetch.fetch_close(fetch.ASSETS[0], now=datetime(2026, 7, 15, 22, tzinfo=timezone.utc))
 
 
+def test_post_switch_adjusted_quotes_need_only_anchor_and_new_sessions(monkeypatch):
+    dates = pd.DatetimeIndex(['2026-09-30', '2026-10-08'])
+    adjusted = pd.DataFrame({'close': [4.796, 4.814]}, index=dates)
+    calls = []
+    monkeypatch.setattr(fetch, 'fetch_em', lambda *args, **kwargs: adjusted)
+    monkeypatch.setattr(fetch, 'fetch_tx', lambda *args, **kwargs:
+                        calls.append('tencent') or None)
+    now = datetime(2026, 10, 8, 8, tzinfo=timezone.utc)
+    result = fetch.fetch_quotes({**fetch.ASSETS[1], 'min_rows': 2}, now=now)
+    assert result['close'].tolist() == [4.796, 4.814]
+    assert calls == []
+    with pytest.raises(RuntimeError, match='insufficient history'):
+        fetch.fetch_quotes(fetch.ASSETS[1], now=now)
+
+
+def test_verified_raw_ratio_uses_same_response_anchor_and_official_check(monkeypatch):
+    dates = pd.DatetimeIndex(['2026-09-30', '2026-10-08'])
+    raw = pd.DataFrame({'close': [4.796, 4.814]}, index=dates)
+    calls = []
+    def raw_source(defn):
+        calls.append(('raw', defn['qfq']))
+        return raw
+    def checked(code, through_date, *, now):
+        calls.append(('official', code, through_date))
+        return {'notices_through': '2026-10-09', 'sources': ['official']}
+    monkeypatch.setattr(fetch, 'fetch_tx', raw_source)
+    monkeypatch.setattr(fetch, 'verify_no_actions', checked)
+    result = fetch.verified_raw_ratio(fetch.ASSETS[1], 4.796, dates[0],
+                                      dates[-1].date(), now=datetime(2026, 10, 8, 22, tzinfo=timezone.utc))
+    assert result.tolist() == pytest.approx([4.796, 4.814])
+    assert calls == [('raw', False), ('official', '161130', dates[-1].date())]
+    assert result.attrs['price_method'] == 'verified_no_action_raw_ratio'
+    assert result.attrs['price_provenance']['raw_anchor_close'] == 4.796
+
+
+@pytest.mark.parametrize('raw,reason', [
+    (pd.DataFrame({'close': [4.814]}, index=pd.DatetimeIndex(['2026-10-08'])), 'anchor'),
+    (pd.DataFrame({'close': [4.795, 4.814]}, index=pd.DatetimeIndex(['2026-09-30', '2026-10-08'])), 'anchors differ'),
+    (pd.DataFrame({'close': [4.796, 4.814]}, index=pd.DatetimeIndex(['2026-09-30', '2026-10-09'])), 'latest date'),
+    (pd.DataFrame({'close': [4.796, 0]}, index=pd.DatetimeIndex(['2026-09-30', '2026-10-08'])), 'invalid close'),
+])
+def test_verified_raw_ratio_rejects_bad_quote_before_disclosures(monkeypatch, raw, reason):
+    monkeypatch.setattr(fetch, 'fetch_tx', lambda defn: raw)
+    monkeypatch.setattr(fetch, 'verify_no_actions', lambda *args, **kwargs:
+                        pytest.fail('must not check disclosures for invalid raw quotes'))
+    with pytest.raises(fetch.FreshnessError, match=reason):
+        fetch.verified_raw_ratio(fetch.ASSETS[1], 4.796, pd.Timestamp('2026-09-30'),
+                                 datetime(2026, 10, 8).date(),
+                                 now=datetime(2026, 10, 8, 22, tzinfo=timezone.utc))
+
+
+def test_verified_raw_ratio_requires_every_open_session(monkeypatch):
+    raw = pd.DataFrame({'close': [4.796, 4.82]},
+                       index=pd.DatetimeIndex(['2026-09-30', '2026-10-09']))
+    monkeypatch.setattr(fetch, 'fetch_tx', lambda defn: raw)
+    monkeypatch.setattr(fetch, 'verify_no_actions', lambda *a, **k:
+                        pytest.fail('incomplete raw history must not be certified'))
+    with pytest.raises(fetch.FreshnessError, match='missing 2026-10-08'):
+        fetch.verified_raw_ratio(fetch.ASSETS[1], 4.796, pd.Timestamp('2026-09-30'),
+                                 datetime(2026, 10, 9).date(),
+                                 now=datetime(2026, 10, 9, 22, tzinfo=timezone.utc))
+
+
+def test_verified_raw_ratio_fails_closed_on_official_uncertainty(monkeypatch):
+    raw = pd.DataFrame({'close': [4.796, 4.814]},
+                       index=pd.DatetimeIndex(['2026-09-30', '2026-10-08']))
+    monkeypatch.setattr(fetch, 'fetch_tx', lambda defn: raw)
+    def uncertain(*args, **kwargs):
+        raise fetch.FreshnessError('new corporate action notice')
+    monkeypatch.setattr(fetch, 'verify_no_actions', uncertain)
+    with pytest.raises(fetch.FreshnessError, match='new corporate action notice'):
+        fetch.verified_raw_ratio(fetch.ASSETS[1], 4.796, pd.Timestamp('2026-09-30'),
+                                 datetime(2026, 10, 8).date(),
+                                 now=datetime(2026, 10, 8, 22, tzinfo=timezone.utc))
+
+
+def test_benchmark_fetch_trims_later_us_close_to_china_cutoff(monkeypatch):
+    raw = _history('2026-10-08')
+    monkeypatch.setattr(fetch, 'fetch_em', lambda *args, **kwargs: raw)
+    cutoff = datetime(2026, 10, 8, 7, tzinfo=timezone.utc)
+    result = fetch.fetch_quotes(fetch.BENCHMARKS[1],
+                                now=datetime(2026, 10, 8, 22, tzinfo=timezone.utc),
+                                as_of=cutoff)
+    assert result.index[-1] == pd.Timestamp('2026-10-07')
+
+
+def test_unavailable_benchmark_does_not_block_held_quotes(monkeypatch):
+    monkeypatch.setattr(fetch, 'fetch_close', lambda *args, **kwargs:
+                        _history('2026-07-15')['close'])
+    monkeypatch.setattr(fetch, 'fetch_quotes', lambda *args, **kwargs:
+                        (_ for _ in ()).throw(RuntimeError('no benchmark source')))
+    closes, bench = fetch.fetch_all(now=datetime(2026, 7, 15, 22, tzinfo=timezone.utc))
+    assert closes['161130'].index[-1] == pd.Timestamp('2026-07-15')
+    assert all(value is None for value in bench.values())
+
+
 def test_fetch_all_uses_one_clock_for_all_symbols(monkeypatch):
     seen = []
+    cutoffs = []
     now = datetime(2026, 7, 15, 22, tzinfo=timezone.utc)
 
     def fake_close(defn, *, now):
         seen.append(now)
         return _history('2026-09-30')['close']
 
+    def fake_quotes(defn, *, now, as_of):
+        cutoffs.append(as_of)
+        return {'close': _history('2026-09-30')['close']}
+
     monkeypatch.setattr(fetch, 'fetch_close', fake_close)
+    monkeypatch.setattr(fetch, 'fetch_quotes', fake_quotes)
     closes, bench = fetch.fetch_all(now=now)
-    assert len(seen) == 7 and all(stamp == now for stamp in seen)
+    assert len(seen) == 4 and all(stamp == now for stamp in seen)
+    assert len(cutoffs) == 3 and all(stamp.isoformat().startswith('2026-07-15T15:00:00+08:00') for stamp in cutoffs)
     assert set(closes) == {a['code'] for a in fetch.ASSETS}
     assert set(bench) == {b['code'] for b in fetch.BENCHMARKS}
 
@@ -135,6 +238,7 @@ def test_after_switch_legacy_price_is_limited_to_quarter_end(monkeypatch):
         return live
 
     monkeypatch.setattr(fetch, 'fetch_close', fake_close)
+    monkeypatch.setattr(fetch, 'fetch_quotes', lambda defn, *, now, as_of: {'close': live})
     closes, _ = fetch.fetch_all(now=datetime(2026, 10, 8, 8, tzinfo=timezone.utc))
     assert closes['159263'].index[-1] == pd.Timestamp('2026-09-30')
     assert closes['161130'].index[-1] == pd.Timestamp('2026-10-08')
@@ -150,3 +254,37 @@ def test_frozen_legacy_history_ends_at_exit_close():
     assert snapshot['switch_date'] == '2026-09-30'
     assert set(snapshot['prices_at_switch']) == {a['code'] for a in fetch.ASSETS}
     assert snapshot['prices_at_switch']['159263'] == 1.133
+
+
+def test_bond_adjusted_open_and_close_keep_fixed_switch_anchor(monkeypatch):
+    dates = pd.DatetimeIndex(['2026-09-30', '2026-10-08'])
+
+    def source(scale):
+        return pd.DataFrame({'open': [134.8, 135.0], 'close': [134.804, 135.1],
+                             'volume': [100, 200]}, index=dates) * scale
+
+    monkeypatch.setattr(fetch, 'fetch_quotes', lambda *args, **kwargs: source(1))
+    first = fetch.fetch_strategy_quotes(now=datetime(2026, 10, 8, 8, tzinfo=timezone.utc))['511260']
+    monkeypatch.setattr(fetch, 'fetch_quotes', lambda *args, **kwargs: source(0.5))
+    second = fetch.fetch_strategy_quotes(now=datetime(2026, 10, 8, 8, tzinfo=timezone.utc))['511260']
+    assert first.loc['2026-09-30', 'close'] == pytest.approx(134.804)
+    assert first[['open', 'close']].equals(second[['open', 'close']])
+    assert second.loc['2026-10-08', 'volume'] == 100  # volume is not a price
+
+
+def test_bond_quote_without_switch_anchor_fails(monkeypatch):
+    monkeypatch.setattr(fetch, 'fetch_quotes', lambda *args, **kwargs:
+                        pd.DataFrame({'open': [135.0], 'close': [135.1]},
+                                     index=pd.DatetimeIndex(['2026-10-08'])))
+    with pytest.raises(fetch.FreshnessError, match='missing Q3 close'):
+        fetch.fetch_strategy_quotes(now=datetime(2026, 10, 8, 8, tzinfo=timezone.utc))
+
+
+def test_adjusted_etf_never_falls_back_to_unadjusted_tencent_rows(monkeypatch):
+    class FakeResp:
+        def json(self):
+            return {'data': {'sh511260': {'day': [['2026-09-30', '1', '1', '1', '1', '10']]}}}
+
+    monkeypatch.setattr(fetch.requests, 'get', lambda *args, **kwargs: FakeResp())
+    monkeypatch.setattr(fetch.time, 'sleep', lambda *args: None)
+    assert fetch.fetch_tx({'tx': 'sh511260', 'qfq': True}) is None

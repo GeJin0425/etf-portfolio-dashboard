@@ -1,0 +1,22 @@
+name: Check live dashboard freshness
+
+on:
+  schedule:
+    # 10:00 Beijing Tue-Sat, after the final 08:00 catch-up attempt.
+    - cron: '0 2 * * 2-6'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  check-live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Verify deployed data date and source integrity
+        run: python -m pipeline.publication --check-live

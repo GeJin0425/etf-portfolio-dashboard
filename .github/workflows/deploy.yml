@@ -2,8 +2,11 @@ name: Deploy dashboard
 
 on:
   schedule:
-    # 05:30 Beijing: after 510880 strategy publication and the US market close.
+    # China Mon-Fri sessions: 05:30 and 06:30 Beijing the next day.
     - cron: '30 21 * * 1-5'
+    - cron: '30 22 * * 1-5'
+    # 08:00 Beijing Tue-Sat, after the same preceding China session.
+    - cron: '0 0 * * 2-6'
   workflow_dispatch: {}
 
 permissions:
@@ -13,7 +16,7 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build-and-deploy:
@@ -41,3 +44,8 @@ jobs:
           path: site
       - id: deployment
         uses: actions/deploy-pages@v4
+      - name: Record publication failure
+        if: failure()
+        run: |
+          echo "::error::Dashboard build or deployment failed; prior Pages data remains published."
+          echo "Dashboard build or deployment failed. Check the failing step and public data date." >> "$GITHUB_STEP_SUMMARY"

@@ -89,6 +89,16 @@ def latest_completed_session(market, now=None):
         day -= timedelta(days=1)
 
 
+def next_session(market, after_date):
+    """First configured exchange session strictly after a quoted date."""
+    day = after_date + timedelta(days=1)
+    while True:
+        _, holidays, _, _ = _calendar(market, day.year)
+        if day.weekday() < 5 and day not in holidays:
+            return day
+        day += timedelta(days=1)
+
+
 def validate_quote_date(actual, defn, now=None):
     expected = latest_completed_session(defn['market'], now)
     if actual != expected:
