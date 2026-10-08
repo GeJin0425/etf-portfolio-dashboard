@@ -190,6 +190,12 @@ def fetch_quotes(defn, limit=1600, *, now=None, as_of=None):
         except FreshnessError as exc:
             errors.append(f'{name}: {exc}')
             continue
+        print(
+            f'Quote source {defn["code"]}: {name}, '
+            f'latest={df.index[-1].date()}, required={needed_close}, '
+            f'adjusted={bool(defn.get("qfq"))}',
+            flush=True,
+        )
         return df
     raise RuntimeError(
         f'无法获取有效新鲜行情: {defn["code"]} {defn["name"]}; ' + '; '.join(errors)
