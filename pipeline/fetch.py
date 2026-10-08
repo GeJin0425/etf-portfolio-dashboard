@@ -6,9 +6,10 @@
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, time as clock_time, timezone
 from functools import partial
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -120,7 +121,8 @@ def fetch_tx(defn, limit=1600):
             resp = requests.get(url, headers=UA, timeout=20)
             payload = resp.json()
             node = payload['data'][key]
-            rows = node.get(row_key) or node.get('day') or node.get('qfqday')
+            # Never silently switch between adjusted ETF prices and raw prices.
+            rows = node.get(row_key)
             if rows:
                 return _to_close_df(rows)
         except Exception:
@@ -160,9 +162,12 @@ def fetch_sina_us(defn, start='2015-01-01'):
     return None
 
 
-def fetch_quotes(defn, limit=1600, *, now=None):
+def fetch_quotes(defn, limit=1600, *, now=None, as_of=None):
     """多源按序尝试; 足够长但陈旧的主源也必须切换, 不得直接发布。"""
     now = utc_now(now)
+    as_of = utc_now(as_of) if as_of is not None else now
+    runtime_close = latest_completed_session(defn['market'], now)
+    needed_close = latest_completed_session(defn['market'], as_of)
     sources = [('eastmoney', partial(fetch_em, limit=limit)),
                ('tencent', partial(fetch_tx, limit=limit))]
     if defn.get('sina'):
@@ -174,7 +179,14 @@ def fetch_quotes(defn, limit=1600, *, now=None):
             errors.append(f'{name}: insufficient history')
             continue
         try:
-            validate_series(df['close'], defn, now)
+            if as_of == now and df.index[-1].date() > runtime_close:
+                raise FreshnessError(f'{defn["code"]}: future/uncompleted quote date {df.index[-1].date()}')
+            # Benchmark feeds may include a later, still-open session. It is
+            # never used: the exact China-close cutoff below selects the bar.
+            df = df.loc[:pd.Timestamp(needed_close)]
+            if len(df) < 60:
+                raise FreshnessError(f'{defn["code"]}: insufficient history before {needed_close}')
+            validate_series(df['close'], defn, as_of)
         except FreshnessError as exc:
             errors.append(f'{name}: {exc}')
             continue
@@ -194,23 +206,43 @@ def load_pre_q4_snapshot():
         snapshot = json.load(f)
     if snapshot['switch_date'] != SWITCH_DATE or snapshot['through'] != '2026-09-29':
         raise ValueError('Q4 切换快照日期不匹配')
+    if abs(snapshot['opening_fees'] - (INITIAL_CAPITAL - snapshot['equity'][0][1])) > 1e-6:
+        raise ValueError('Q4 快照建仓费用与首日净值不匹配')
+    if snapshot['strategy_prices_at_switch']['511260'] <= 0:
+        raise ValueError('511260 Q3 固定价格锚点无效')
     return snapshot
 
 
 def fetch_strategy_quotes(*, now=None):
     now = utc_now(now)
-    return {'511260': fetch_quotes(STRATEGY_ASSETS[1], now=now)}
+    quote = fetch_quotes(STRATEGY_ASSETS[1], now=now)
+    anchor = pd.Timestamp(SWITCH_DATE)
+    if anchor not in quote.index:
+        raise FreshnessError('511260: missing Q3 close for price continuity')
+    saved_close = load_pre_q4_snapshot()['strategy_prices_at_switch']['511260']
+    factor = saved_close / float(quote.loc[anchor, 'close'])
+    anchored = quote.loc[anchor:].copy()
+    anchored[['open', 'close']] *= factor
+    return {'511260': anchored}
 
 
 def fetch_all(*, now=None):
-    """并发拉取全部资产与基准, 共享同一个新鲜度校验时点。"""
+    """Holdings are required; comparison indices may be absent without blocking NAV."""
     now = utc_now(now)
+    china_close = latest_completed_session('XSHE', now)
+    cutoff = datetime.combine(china_close, clock_time(15), ZoneInfo('Asia/Shanghai'))
     defs = ASSETS + BENCHMARKS
     after_switch = latest_completed_session('XSHE', now).isoformat() >= SWITCH_DATE
     snapshot = load_pre_q4_snapshot() if after_switch else None
     anchor = pd.Timestamp(SWITCH_DATE)
 
     def read(defn):
+        if defn in BENCHMARKS:
+            try:
+                return fetch_quotes(defn, now=now, as_of=cutoff)['close']
+            except RuntimeError as exc:
+                print(f'Optional benchmark unavailable: {exc}', flush=True)
+                return None
         if not after_switch or defn not in ASSETS:
             return fetch_close(defn, now=now)
         if defn['code'] == '159263':
