@@ -1,6 +1,8 @@
 import pandas as pd
+import pytest
 
 from pipeline.portfolio import run_portfolio
+from pipeline import fetch
 
 
 def _closes(dates, base, drift):
@@ -29,6 +31,7 @@ def test_initial_allocation_and_quarterly_rebalance():
     assert len(res['rebalances']) == 2  # 2026-03-31 与 2026-06-30
     assert res['cash'] >= 0
     assert res['fees_paid'] > 0
+    assert res['fees_paid'] >= 2  # all four opening purchases are counted
     assert eq.iloc[-1] > 10000
 
     # 每次再平衡后权重应回到目标附近
@@ -83,3 +86,21 @@ def test_weights_must_sum_to_one():
     except ValueError:
         return
     raise AssertionError('权重和不为1时应报错')
+
+
+def test_snapshot_opening_fees_are_reported_without_second_nav_deduction():
+    snapshot = fetch.load_pre_q4_snapshot()
+    dates = pd.DatetimeIndex(['2026-09-30', '2026-10-08'])
+    closes = {code: pd.Series(price, index=dates)
+              for code, price in snapshot['prices_at_switch'].items()}
+    closes['510880'] = pd.Series(3.0, index=dates)
+    closes['511260'] = pd.Series(134.804, index=dates)
+    args = (closes, [(a['code'], a['weight']) for a in fetch.ASSETS])
+    baseline = run_portfolio(*args, strategy={'switch_asset': '511260', 'fills': []},
+                             bond_opens=pd.Series(134.804, index=dates),
+                             snapshot={**snapshot, 'opening_fees': 0})
+    corrected = run_portfolio(*args, strategy={'switch_asset': '511260', 'fills': []},
+                              bond_opens=pd.Series(134.804, index=dates), snapshot=snapshot)
+    assert corrected['equity'].equals(baseline['equity'])
+    assert corrected['equity'].iloc[0] == snapshot['equity'][0][1]
+    assert corrected['fees_paid'] - baseline['fees_paid'] == pytest.approx(4.954605)
