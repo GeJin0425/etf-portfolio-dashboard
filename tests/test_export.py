@@ -9,6 +9,7 @@ import pytest
 
 from pipeline import export, fetch
 from pipeline.freshness import FreshnessError
+from pipeline.freshness import latest_completed_session
 from pipeline.portfolio import run_portfolio
 
 BASES = {'159263': 1.0, '161130': 4.0, '161125': 3.0, '518850': 8.0}
@@ -23,9 +24,15 @@ def _series(dates, base):
 def _make_fake_fetch_all(etf_dates, bench_dates_by_code=None):
     bench_dates_by_code = bench_dates_by_code or {}
     closes = {code: _series(etf_dates, base) for code, base in BASES.items()}
-    default_bench_dates = pd.DatetimeIndex([pd.Timestamp('2025-12-31')]).append(etf_dates)
+    us_dates = sorted({pd.Timestamp('2025-12-31')} | {
+        pd.Timestamp(latest_completed_session('US', export.china_close(day)))
+        for day in etf_dates
+    })
+    default_us_dates = pd.DatetimeIndex(us_dates)
     bench = {
-        code: _series(bench_dates_by_code.get(code, default_bench_dates), base)
+        code: _series(bench_dates_by_code.get(
+            code, pd.DatetimeIndex([pd.Timestamp('2025-12-31')]).append(etf_dates)
+            if code == '000300' else default_us_dates), base)
         for code, base in BENCH_BASES.items()
     }
     return closes, bench
@@ -54,7 +61,62 @@ def test_export_builds_payload(tmp_path, monkeypatch):
     assert data['series']['portfolio'][0] == 0.0
     assert set(data['meta']['source_dates']) == set(BASES) | set(BENCH_BASES)
     assert data['meta']['source_dates']['161130']['market'] == 'XSHE'
+    assert data['meta']['source_dates']['SPX']['actual'] == '2026-07-14'
+    assert data['series']['sp500'][0] == 0.0
+    assert all(h['return_base_date'] == '2026-01-05' for h in data['holdings'])
     export.validate_payload_freshness(data, now=NOW)
+
+
+def test_us_comparison_uses_last_close_known_at_each_china_close():
+    china = pd.DatetimeIndex(['2026-01-05', '2026-01-06', '2026-10-08'])
+    us = pd.Series([100, 110, 120, 999], index=pd.DatetimeIndex([
+        '2026-01-02', '2026-01-05', '2026-10-07', '2026-10-08']))
+    aligned = export.comparison_series(us, china, 'US')
+    assert aligned.tolist() == [100, 110, 120]
+    assert export.normalized_return(aligned).tolist() == pytest.approx([0, 10, 20])
+    assert export.ytd_return(us, '2026-10-07', '2026-01-02') == 20
+
+
+def test_optional_benchmark_absence_does_not_change_portfolio(tmp_path, monkeypatch):
+    dates = pd.date_range('2026-01-05', '2026-07-15', freq='B')
+    closes, bench = _make_fake_fetch_all(dates)
+    monkeypatch.setattr(export, 'fetch_all', lambda **kwargs: (closes, bench))
+    full = export.export(tmp_path / 'full.json', now=NOW)
+    bench['NDX'] = None
+    partial = export.export(tmp_path / 'partial.json', now=NOW)
+    assert partial['series']['portfolio'] == full['series']['portfolio']
+    assert partial['meta']['current_value'] == full['meta']['current_value']
+    assert partial['meta']['source_dates']['NDX'] == {
+        'actual': None, 'expected': '2026-07-14', 'market': 'US', 'status': 'unavailable'}
+    assert all(v is None for v in partial['series']['ndx100'])
+    assert partial['meta']['ndx100_ytd_pct'] is None
+    assert partial['meta']['excess_ndx100_pct'] is None
+    export.validate_payload_freshness(partial, now=NOW)
+
+
+def test_optional_benchmark_historical_gap_is_visible(tmp_path, monkeypatch):
+    dates = pd.date_range('2026-01-05', '2026-07-15', freq='B')
+    closes, bench = _make_fake_fetch_all(dates)
+    bench['SPX'] = bench['SPX'].drop(pd.Timestamp('2026-01-05'))
+    monkeypatch.setattr(export, 'fetch_all', lambda **kwargs: (closes, bench))
+    payload = export.export(tmp_path / 'data.json', now=NOW)
+    source = payload['meta']['source_dates']['SPX']
+    assert source['status'] == 'partial'
+    assert source['first_missing'] == '2026-01-05'
+    assert source['missing_count'] >= 1
+    assert payload['series']['sp500'][1] is None
+    assert payload['series']['sp500'][2] is not None
+
+
+def test_post_switch_missing_intermediate_held_close_is_rejected():
+    dates = pd.DatetimeIndex(['2026-09-30', '2026-10-09'])
+    sources = {code: pd.Series([1, 2], index=dates)
+               for code in ('161130', '161125', '518850', '510880', '511260')}
+    opens = pd.Series([1, 2], index=dates)
+    with pytest.raises(FreshnessError, match='161130.*2026-10-08'):
+        export.validate_post_switch_history(sources, opens, '2026-10-09')
+    assert export.required_cn_dates('2026-09-30', '2026-10-09').strftime('%Y-%m-%d').tolist() == [
+        '2026-09-30', '2026-10-08', '2026-10-09']
 
 
 def test_export_replaces_value_sleeve_after_quarter_end(tmp_path, monkeypatch):
@@ -71,7 +133,9 @@ def test_export_replaces_value_sleeve_after_quarter_end(tmp_path, monkeypatch):
     )
     snapshot = {
         'equity': [[d.strftime('%Y-%m-%d'), float(v)] for d, v in old['equity'].items()],
-        'shares': old['shares'], 'cash': old['cash'], 'fees_paid': old['fees_paid'],
+        'shares': old['shares'], 'cash': old['cash'],
+        'opening_fees': fetch.INITIAL_CAPITAL - float(old['equity'].iloc[0]),
+        'fees_paid': old['fees_paid'] - (fetch.INITIAL_CAPITAL - float(old['equity'].iloc[0])),
         'rebalances': old['rebalances'],
         'start_prices': {code: float(s.loc['2026-01-05']) for code, s in closes.items()},
     }
@@ -89,7 +153,9 @@ def test_export_replaces_value_sleeve_after_quarter_end(tmp_path, monkeypatch):
     monkeypatch.setattr(export, 'fetch_strategy_quotes', lambda **kwargs: {
         '511260': pd.DataFrame({'open': 100.0, 'close': 100.0}, index=prices),
     })
-    now = datetime(2026, 10, 8, 8, tzinfo=timezone.utc)
+    # At the 05:30/06:30 Beijing run, the U.S. Oct 8 close may already exist,
+    # but the China Oct 8 portfolio close can only use the U.S. Oct 7 close.
+    now = datetime(2026, 10, 8, 22, tzinfo=timezone.utc)
     payload = export.export(tmp_path / 'data.json', now=now)
     assert payload['meta']['as_of_date'] == '2026-10-08'
     assert payload['meta']['strategy_asset'] == '510880'
@@ -98,6 +164,8 @@ def test_export_replaces_value_sleeve_after_quarter_end(tmp_path, monkeypatch):
         ('511260', '卖出'), ('510880', '买入'),
     ]
     assert payload['meta']['source_dates']['159263']['expected'] == '2026-09-30'
+    assert payload['meta']['source_dates']['SPX']['actual'] == '2026-10-07'
+    assert next(h for h in payload['holdings'] if h['code'] == '510880')['return_base_date'] == '2026-09-30'
     export.validate_payload_freshness(payload, now=now)
 
 
@@ -124,16 +192,7 @@ def test_export_survives_us_holiday_on_last_cn_trading_day(tmp_path, monkeypatch
     """回归: 组合最后一个A股交易日恰好是美股假日(基准序列没有这一天),
     ytd_return()/主图归一化不应该因为精确日期查找而崩溃(export.py:58 曾经的 bug)。"""
     etf_dates = pd.date_range('2026-01-05', '2026-07-03', freq='B')
-    last = etf_dates[-1]
-    default_bench_dates = pd.DatetimeIndex([pd.Timestamp('2025-12-31')]).append(etf_dates)
-    bench_dates_missing_last = default_bench_dates[default_bench_dates != last]
-    closes, bench = _make_fake_fetch_all(
-        etf_dates,
-        bench_dates_by_code={
-            'SPX': bench_dates_missing_last,
-            'NDX': bench_dates_missing_last,
-        },
-    )
+    closes, bench = _make_fake_fetch_all(etf_dates)
     monkeypatch.setattr(export, 'fetch_all', lambda **kwargs: (closes, bench))
 
     out = tmp_path / 'data.json'
@@ -145,6 +204,7 @@ def test_export_survives_us_holiday_on_last_cn_trading_day(tmp_path, monkeypatch
     assert payload['series']['sp500'][-1] is not None
     assert payload['series']['csi300'][-1] is not None
     assert payload['series']['ndx100'][-1] is not None
+    assert payload['meta']['source_dates']['SPX']['actual'] == '2026-07-02'
 
 
 def test_export_rejects_stale_single_asset_before_ffill(tmp_path, monkeypatch):
@@ -162,23 +222,22 @@ def test_export_rejects_stale_single_asset_before_ffill(tmp_path, monkeypatch):
     assert out.read_text(encoding='utf-8') == 'previous valid artifact'
 
 
-def test_export_benchmark_return_not_nan_when_history_starts_late(tmp_path, monkeypatch):
-    """回归: 基准历史比组合起始日晚开始时, reindex+ffill 无法回补最早的缺口,
-    加一次 bfill 后归一化基准点不应变成 NaN, 导致整条收益率曲线消失(export.py:112 曾经的 bug)。"""
+def test_export_does_not_future_fill_missing_comparison_baseline(tmp_path, monkeypatch):
+    """A missing entry baseline cannot be reconstructed from a later close."""
     etf_dates = pd.date_range('2026-01-05', '2026-07-15', freq='B')
-    bench_dates_late = pd.DatetimeIndex(etf_dates[1:])  # 第一个交易日没有基准数据
-    closes, bench = _make_fake_fetch_all(
-        etf_dates,
-        bench_dates_by_code={'000300': bench_dates_late, 'SPX': bench_dates_late, 'NDX': bench_dates_late},
-    )
+    closes, bench = _make_fake_fetch_all(etf_dates)
+    bench['000300'] = bench['000300'].drop(pd.Timestamp('2026-01-05'))
+    for code in ('SPX', 'NDX'):
+        bench[code] = bench[code].drop(pd.Timestamp('2026-01-02'))
     monkeypatch.setattr(export, 'fetch_all', lambda **kwargs: (closes, bench))
 
     out = tmp_path / 'data.json'
     payload = export.export(str(out), now=NOW)
 
-    assert all(v is not None for v in payload['series']['sp500'])
-    assert all(v is not None for v in payload['series']['csi300'])
-    assert all(v is not None for v in payload['series']['ndx100'])
+    assert all(v is None for v in payload['series']['sp500'])
+    assert all(v is None for v in payload['series']['csi300'])
+    assert all(v is None for v in payload['series']['ndx100'])
+    assert payload['meta']['sp500_return_pct'] is None
 
 
 @pytest.mark.parametrize('code', ['000300', 'SPX', 'NDX'])
@@ -251,6 +310,17 @@ def test_upload_gate_rechecks_every_date_at_publication_time(tmp_path, monkeypat
     with pytest.raises(FreshnessError, match='stale'):
         export.validate_payload_freshness(
             payload, now=datetime(2026, 7, 16, 22, tzinfo=timezone.utc))
+
+
+def test_upload_gate_rejects_non_null_unavailable_benchmark_kpi(tmp_path, monkeypatch):
+    dates = pd.date_range('2026-01-05', '2026-07-15', freq='B')
+    closes, bench = _make_fake_fetch_all(dates)
+    bench['NDX'] = None
+    monkeypatch.setattr(export, 'fetch_all', lambda **kwargs: (closes, bench))
+    payload = export.export(tmp_path / 'data.json', now=NOW)
+    payload['meta']['ndx100_ytd_pct'] = 12.34
+    with pytest.raises(FreshnessError, match='unavailable benchmark has values'):
+        export.validate_payload_freshness(payload, now=NOW)
 
 
 @pytest.mark.parametrize('field,value', [('expected', '2026-07-14'), ('market', 'US'),
