@@ -18,9 +18,13 @@ function baseGrid() {
 }
 
 async function main() {
+  const dataUrl = ['gejin0425.github.io', 'localhost', '127.0.0.1'].includes(window.location.hostname)
+    ? './data.json'
+    : 'https://gejin0425.github.io/etf-portfolio-dashboard/data.json';
+  document.getElementById('data-source-link').href = dataUrl;
   let data;
   try {
-    const res = await fetch('./data.json', { cache: 'no-store' });
+    const res = await fetch(dataUrl, { cache: 'no-store' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     data = await res.json();
   } catch (err) {
