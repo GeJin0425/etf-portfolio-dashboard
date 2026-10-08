@@ -1,0 +1,22 @@
+name: Check current quote sources
+
+on:
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build-without-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Build and independently validate current data
+        run: |
+          python -m pipeline.export
+          python -m pipeline.export --validate site/data.json
