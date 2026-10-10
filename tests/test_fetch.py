@@ -89,10 +89,19 @@ def test_fetch_close_falls_back_when_primary_has_long_but_stale_history(monkeypa
 
 
 def test_fetch_close_falls_back_from_future_dated_primary(monkeypatch):
-    monkeypatch.setattr(fetch, 'fetch_em', lambda *args, **kwargs: _history('2026-07-16'))
+    monkeypatch.setattr(fetch, 'fetch_em', lambda *args, **kwargs: _history('2026-07-17'))
     monkeypatch.setattr(fetch, 'fetch_tx', lambda *args, **kwargs: _history('2026-07-15'))
     series = fetch.fetch_close(fetch.ASSETS[0], now=datetime(2026, 7, 15, 22, tzinfo=timezone.utc))
     assert series.index[-1] == pd.Timestamp('2026-07-15')
+
+
+def test_fetch_close_uses_completed_close_when_primary_has_intraday_tail(monkeypatch):
+    calls = []
+    monkeypatch.setattr(fetch, 'fetch_em', lambda *args, **kwargs: _history('2026-10-09'))
+    monkeypatch.setattr(fetch, 'fetch_tx', lambda *args, **kwargs: calls.append('tencent'))
+    series = fetch.fetch_close(fetch.ASSETS[0], now=datetime(2026, 10, 9, 4, tzinfo=timezone.utc))
+    assert series.index[-1] == pd.Timestamp('2026-10-08')
+    assert calls == []
 
 
 def test_fetch_close_falls_back_to_fresh_sina_us(monkeypatch):
@@ -143,6 +152,20 @@ def test_verified_raw_ratio_uses_same_response_anchor_and_official_check(monkeyp
     assert calls == [('raw', False), ('official', '161130', dates[-1].date())]
     assert result.attrs['price_method'] == 'verified_no_action_raw_ratio'
     assert result.attrs['price_provenance']['raw_anchor_close'] == 4.796
+
+
+def test_verified_raw_ratio_ignores_only_today_pending_bar(monkeypatch):
+    dates = pd.DatetimeIndex(['2026-09-30', '2026-10-08', '2026-10-09'])
+    raw = pd.DataFrame({'close': [4.796, 4.814, 4.9]}, index=dates)
+    calls = []
+    monkeypatch.setattr(fetch, 'fetch_tx', lambda defn: raw)
+    monkeypatch.setattr(fetch, 'verify_no_actions', lambda code, through_date, *, now:
+                        calls.append((code, through_date)) or {'notices_through': '2026-10-09'})
+    result = fetch.verified_raw_ratio(fetch.ASSETS[1], 4.796, dates[0],
+                                      dates[1].date(), now=datetime(2026, 10, 9, 4, tzinfo=timezone.utc))
+    assert result.index.equals(dates[:2])
+    assert result.tolist() == pytest.approx([4.796, 4.814])
+    assert calls == [('161130', dates[1].date())]
 
 
 @pytest.mark.parametrize('raw,reason', [

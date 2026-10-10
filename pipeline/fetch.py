@@ -165,6 +165,23 @@ def fetch_sina_us(defn, start='2015-01-01'):
     return None
 
 
+def trim_pending_session(df, defn, completed_date, *, now):
+    """Ignore only today's still-open session, never a missing completed close.
+
+    Some daily feeds append an intraday bar under the current trading date.
+    The preceding completed session remains usable, but any other later date
+    is a source error rather than an invitation to silently truncate history.
+    """
+    later = df.index[df.index > pd.Timestamp(completed_date)]
+    if len(later):
+        pending = next_session(defn['market'], completed_date)
+        zone = 'Asia/Shanghai' if defn['market'] in ('XSHG', 'XSHE') else 'America/New_York'
+        today = utc_now(now).astimezone(ZoneInfo(zone)).date()
+        if len(later) != 1 or later[0].date() != pending or pending != today:
+            raise FreshnessError(f'{defn["code"]}: future/uncompleted quote date {later[-1].date()}')
+    return df.loc[:pd.Timestamp(completed_date)]
+
+
 def fetch_quotes(defn, limit=1600, *, now=None, as_of=None):
     """多源按序尝试; 足够长但陈旧的主源也必须切换, 不得直接发布。"""
     now = utc_now(now)
@@ -183,8 +200,8 @@ def fetch_quotes(defn, limit=1600, *, now=None, as_of=None):
             errors.append(f'{name}: insufficient history ({0 if df is None else len(df)} rows; need {minimum})')
             continue
         try:
-            if as_of == now and df.index[-1].date() > runtime_close:
-                raise FreshnessError(f'{defn["code"]}: future/uncompleted quote date {df.index[-1].date()}')
+            if as_of == now:
+                df = trim_pending_session(df, defn, runtime_close, now=now)
             # Benchmark feeds may include a later, still-open session. It is
             # never used: the exact China-close cutoff below selects the bar.
             df = df.loc[:pd.Timestamp(needed_close)]
@@ -249,6 +266,9 @@ def verified_raw_ratio(defn, saved_close, anchor, required_date, *, now):
     code = defn['code']
     if raw is None or raw.empty or anchor not in raw.index:
         raise FreshnessError(f'{code}: raw bridge missing frozen price anchor')
+    if latest_completed_session(defn['market'], now) != required_date:
+        raise FreshnessError(f'{code}: raw bridge required date is not the latest completed session')
+    raw = trim_pending_session(raw, defn, required_date, now=now)
     if raw.index[-1].date() != required_date:
         raise FreshnessError(f'{code}: raw bridge latest date is not {required_date}')
     needed = [anchor]
